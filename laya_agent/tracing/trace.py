@@ -21,7 +21,7 @@ Trace schema (18 documented fields + commit_hash provenance field):
   10. confidence        float    calibrated LAYA confidence in [0.0, 1.0]
   11. fallback_used     bool    True if confidence < tau or on provider exception
   12. gate_latency_ms   float   synchronized GPU gate execution time (ms)
-  13. llm_latency_ms    float   hosted LLM API round-trip time (ms)
+  13. llm_latency_ms     float   hosted LLM API round-trip time (ms)
   14. input_tokens      int     prompt/context tokens billed this step
   15. output_tokens     int     completion tokens billed this step
   16. tool              str|None name of executed tool, if applicable
