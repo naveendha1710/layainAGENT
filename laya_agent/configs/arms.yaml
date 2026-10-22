@@ -1,0 +1,113 @@
+# LAYA Agent Experiment Arm Configuration
+# Frozen baseline definitions for Arms A, B_regex, B, C_always_small, C_random, C, D.
+#
+# Governed by the "build once, toggle via config" philosophy: every gate is
+# active or inactive strictly through these mode flags. No per-arm code branches.
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+temperature: 0
+seed: 42
+
+# Hosted LLM tier models (parameterized via NVIDIA_API_KEY / env overrides;
+# SMALL_TIER_MODEL is selected during Milestone 5 Dev-split calibration).
+BIG_TIER_MODEL: "nemotron-3.5-super-vl-120b-a12b"
+SMALL_TIER_MODEL: "${SMALL_TIER_MODEL}"        # set via env at Milestone 5
+NVIDIA_BUILD_BASE_URL: "https://integrate.api.nvidia.com/v1"
+NVIDIA_API_KEY: "${NVIDIA_API_KEY}"
+
+# Token pricing (frozen price sheet, USD per 1M tokens; populated in Milestone 4).
+pricing:
+  big_tier:
+    input_per_1m: 0.0
+    output_per_1m: 0.0
+  small_tier:
+    input_per_1m: 0.0
+    output_per_1m: 0.0
+
+# User-task split (25 Dev / 50 Test; 1 benign + 2 matched injections per task).
+splits:
+  dev: 25
+  test: 50
+  benign_per_task: 1
+  injection_per_task: 2
+
+# Confidence thresholds (tuned on the Dev split, frozen for the Test split).
+thresholds:
+  tau_scorer: 0.70
+  tau_filter: 0.70
+  tau_router: 0.70
+  tau_inj: 0.90
+  tau_rel: 0.70
+  tau_supervisor: 0.70
+
+# Gate modes: off | laya | regex | always_small | always_big | random
+#   off      - gate disabled (pass-through)
+#   laya     - real ModernBERT-large gate
+#   regex    - heuristic firewall baseline (Arm B_regex only)
+#   always_small / always_big / random - scorer baselines (Arm C baselines only)
+arms:
+  A:
+    name: "Baseline"
+    description: "Standard ReAct + FAISS Top-K policy retrieval, Big Tier, all gates off"
+    scorer: off
+    filter: off
+    router: off
+    firewall: off
+    supervisor: off
+    model_tier: big
+  B_regex:
+    name: "Heuristic Security Baseline"
+    description: "Arm A + firewall regex, all other gates off"
+    scorer: off
+    filter: off
+    router: off
+    firewall: regex
+    supervisor: off
+    model_tier: big
+  B:
+    name: "LAYA Safety & Control"
+    description: "Arm A + Context Firewall (laya) + Supervisor (laya)"
+    scorer: off
+    filter: off
+    router: off
+    firewall: laya
+    supervisor: laya
+    model_tier: big
+  C_always_small:
+    name: "Static Cost Baseline"
+    description: "Arm B + scorer always_small"
+    scorer: always_small
+    filter: off
+    router: off
+    firewall: laya
+    supervisor: laya
+    model_tier: small
+  C_random:
+    name: "Random Routing Baseline"
+    description: "Arm B + scorer random"
+    scorer: random
+    filter: off
+    router: off
+    firewall: laya
+    supervisor: laya
+    model_tier: dynamic
+  C:
+    name: "LAYA Cost Routing"
+    description: "Arm B + scorer laya dynamic routing between Small and Big Tier"
+    scorer: laya
+    filter: off
+    router: off
+    firewall: laya
+    supervisor: laya
+    model_tier: dynamic
+  D:
+    name: "Full LAYA Architecture"
+    description: "Arm C + Applicability Filter (laya) + Action Router (laya)"
+    scorer: laya
+    filter: laya
+    router: laya
+    firewall: laya
+    supervisor: laya
+    model_tier: dynamic

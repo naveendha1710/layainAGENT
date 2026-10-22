@@ -1,0 +1,26 @@
+# LAYA Agent Research Project — Python dependencies
+#
+# Install once:  pip install -r requirements.txt
+#
+# Notes:
+#   * `laya` (ModernBERT-large runtime) is installed from the LAYA runtime
+#     distribution (NandhaKishorM/laya) and is not on PyPI.
+#   * `faiss-cpu` / `faiss-gpu`, `sentence-transformers`, `openai` are required
+#     from Milestone 1 onward (dual-tier LLM client + read-only policy store).
+#   * `torch` is required from Phase 0 for GPU-synchronized gate timing.
+
+# Core (Phase 0)
+pydantic>=2.0
+pyyaml>=6.0
+pytest>=7.0
+
+# GPU gate runtime (Phase 0+)
+torch>=2.0
+
+# Hosted LLM client + retrieval (Milestone 1+)
+openai>=1.0
+faiss-cpu>=1.7
+sentence-transformers>=2.2
+
+# AgentDojo benchmark (Milestone 1+)
+agentdojo>=0.1
