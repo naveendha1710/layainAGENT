@@ -1,8 +1,11 @@
-"""Agent controllers for Arm A and Arm B ("build once, toggle via config").
+"""Agent controllers for Arm A, B, and C ("build once, toggle via config").
 
 Arm A: Unaugmented ReAct baseline (all gates off).
 Arm B_regex: Heuristic security baseline (firewall regex, supervisor off).
 Arm B: LAYA Safety & Control (Context Firewall laya + Supervisor laya).
+Arm C_always_small: Static cost baseline (scorer always_small, firewall laya, supervisor laya).
+Arm C_random: Random routing baseline (scorer random, firewall laya, supervisor laya).
+Arm C: LAYA Cost Routing (scorer laya, firewall laya, supervisor laya).
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from typing import Any, Dict, Optional
 from laya_agent.agent.core.loop import GateHook, ReActLoop
 from laya_agent.agent.core.state import AgentState
 from laya_agent.agent.gates.firewall import ContextFirewall
+from laya_agent.agent.gates.scorer import ScorerGate
 from laya_agent.agent.gates.supervisor import SupervisorGate
 
 
@@ -100,29 +104,112 @@ class ArmB:
         return self.loop.run(initial_prompt)
 
 
+class ArmC:
+    """Arm C: Cost Routing (Scorer + Context Firewall + Supervisor)."""
+
+    def __init__(
+        self,
+        state: AgentState,
+        llm_client: Any,
+        tool_registry: Any,
+        max_steps: int = 10,
+        scorer_mode: str = "laya",
+        firewall_mode: str = "laya",
+        supervisor_mode: str = "laya",
+        scorer_engine: Optional[Any] = None,
+        firewall_engine: Optional[Any] = None,
+        supervisor_engine: Optional[Any] = None,
+        tau_scorer: float = 0.70,
+        tau_inj: float = 0.90,
+        tau_rel: float = 0.70,
+        tau_supervisor: float = 0.70,
+        seed: Optional[int] = 42,
+    ) -> None:
+        self.state = state
+        self.state.max_steps = max_steps
+
+        scorer_gate = ScorerGate(
+            tau=tau_scorer,
+            mode=scorer_mode,
+            engine=scorer_engine,
+            seed=seed,
+        )
+        firewall_gate = ContextFirewall(
+            tau_inj=tau_inj,
+            tau_rel=tau_rel,
+            mode=firewall_mode,
+            engine=firewall_engine,
+        )
+        supervisor_gate = SupervisorGate(
+            tau=tau_supervisor,
+            mode=supervisor_mode,
+            engine=supervisor_engine,
+        )
+
+        hooks: Dict[str, GateHook] = {
+            "scorer": GateHook(
+                name="scorer",
+                gate=scorer_gate,
+                ctx_builder=lambda st: {
+                    "state": st,
+                    "initial_prompt": st.messages[0]["content"] if st.messages else "",
+                },
+            ),
+            "firewall": GateHook(
+                name="firewall",
+                gate=firewall_gate,
+                ctx_builder=lambda st: {
+                    "state": st,
+                    "user_prompt": st.messages[0]["content"] if st.messages else "",
+                },
+            ),
+            "supervisor": GateHook(
+                name="supervisor",
+                gate=supervisor_gate,
+                ctx_builder=lambda st: {
+                    "state": st,
+                    "trajectory": st.trajectory,
+                },
+            ),
+        }
+
+        self.loop = ReActLoop(
+            state=state,
+            hooks=hooks,
+            llm_client=llm_client,
+            tool_registry=tool_registry,
+        )
+
+    def run(self, initial_prompt: str) -> AgentState:
+        return self.loop.run(initial_prompt)
+
+
 def create_agent(
     arm: str,
     state: AgentState,
     llm_client: Any,
     tool_registry: Any,
     max_steps: int = 10,
+    scorer_engine: Optional[Any] = None,
     firewall_engine: Optional[Any] = None,
     supervisor_engine: Optional[Any] = None,
+    tau_scorer: float = 0.70,
     tau_inj: float = 0.90,
     tau_rel: float = 0.70,
     tau_supervisor: float = 0.70,
+    seed: Optional[int] = 42,
 ) -> Any:
     """Factory creating the appropriate agent controller for the requested arm."""
-    arm_upper = arm.upper() if arm in {"A", "B", "C", "D"} else arm
+    arm_key = arm.strip()
 
-    if arm_upper == "A":
+    if arm_key in {"A", "a"}:
         return ArmABaseline(
             state=state,
             llm_client=llm_client,
             tool_registry=tool_registry,
             max_steps=max_steps,
         )
-    elif arm_upper == "B_REGEX":
+    elif arm_key.lower() == "b_regex":
         return ArmB(
             state=state,
             llm_client=llm_client,
@@ -136,7 +223,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
         )
-    elif arm_upper == "B":
+    elif arm_key in {"B", "b"}:
         return ArmB(
             state=state,
             llm_client=llm_client,
@@ -149,22 +236,80 @@ def create_agent(
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
+        )
+    elif arm_key.lower() == "c_always_small":
+        return ArmC(
+            state=state,
+            llm_client=llm_client,
+            tool_registry=tool_registry,
+            max_steps=max_steps,
+            scorer_mode="always_small",
+            firewall_mode="laya",
+            supervisor_mode="laya",
+            scorer_engine=scorer_engine,
+            firewall_engine=firewall_engine,
+            supervisor_engine=supervisor_engine,
+            tau_scorer=tau_scorer,
+            tau_inj=tau_inj,
+            tau_rel=tau_rel,
+            tau_supervisor=tau_supervisor,
+            seed=seed,
+        )
+    elif arm_key.lower() == "c_random":
+        return ArmC(
+            state=state,
+            llm_client=llm_client,
+            tool_registry=tool_registry,
+            max_steps=max_steps,
+            scorer_mode="random",
+            firewall_mode="laya",
+            supervisor_mode="laya",
+            scorer_engine=scorer_engine,
+            firewall_engine=firewall_engine,
+            supervisor_engine=supervisor_engine,
+            tau_scorer=tau_scorer,
+            tau_inj=tau_inj,
+            tau_rel=tau_rel,
+            tau_supervisor=tau_supervisor,
+            seed=seed,
+        )
+    elif arm_key in {"C", "c"}:
+        return ArmC(
+            state=state,
+            llm_client=llm_client,
+            tool_registry=tool_registry,
+            max_steps=max_steps,
+            scorer_mode="laya",
+            firewall_mode="laya",
+            supervisor_mode="laya",
+            scorer_engine=scorer_engine,
+            firewall_engine=firewall_engine,
+            supervisor_engine=supervisor_engine,
+            tau_scorer=tau_scorer,
+            tau_inj=tau_inj,
+            tau_rel=tau_rel,
+            tau_supervisor=tau_supervisor,
+            seed=seed,
         )
     else:
-        # Default fallback to Arm B for safety
-        return ArmB(
+        # Default fallback to Arm C
+        return ArmC(
             state=state,
             llm_client=llm_client,
             tool_registry=tool_registry,
             max_steps=max_steps,
+            scorer_mode="laya",
             firewall_mode="laya",
             supervisor_mode="laya",
+            scorer_engine=scorer_engine,
             firewall_engine=firewall_engine,
             supervisor_engine=supervisor_engine,
+            tau_scorer=tau_scorer,
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
+            seed=seed,
         )
 
 
-__all__ = ["ArmABaseline", "ArmB", "create_agent"]
+__all__ = ["ArmABaseline", "ArmB", "ArmC", "create_agent"]

@@ -91,6 +91,11 @@ class ReActLoop:
                 raw=scorer_result.raw_output,
             ))
             self.state.model_tier = scorer_result.decision.value
+            max_steps = scorer_result.raw_output.get("max_steps")
+            if max_steps is not None:
+                self.state.max_steps = int(max_steps)
+            elif scorer_result.decision == Decision.SMALL:
+                self.state.max_steps = 4
 
         while self.state.can_continue():
             # --- PLAN / reason via LLM (unless router says bypass) ---
@@ -112,8 +117,14 @@ class ReActLoop:
             tool_args: Dict[str, Any] = {}
 
             if call_llm:
+                model_kwarg = {}
+                if hasattr(self.llm_client, "get_model_for_tier"):
+                    model_kwarg["model"] = self.llm_client.get_model_for_tier(self.state.model_tier)
+                elif hasattr(self.llm_client, "small_model") and self.state.model_tier == "small":
+                    model_kwarg["model"] = self.llm_client.small_model
+
                 t0 = time.perf_counter()
-                response = self.llm_client.chat_complete(self.state.messages)
+                response = self.llm_client.chat_complete(self.state.messages, **model_kwarg)
                 llm_latency_ms = (time.perf_counter() - t0) * 1000.0
                 self.state.record_step(StepRecord(
                     step=self.state.step,
