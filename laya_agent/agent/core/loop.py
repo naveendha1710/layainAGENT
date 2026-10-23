@@ -24,10 +24,12 @@ class GateHook:
     gate: Optional[Gate]
     ctx_builder: Callable[[AgentState], Dict[str, Any]]
 
-    def evaluate(self, state: AgentState) -> Optional[GateResult]:
-        if self.gate is None:
+    def evaluate(self, state: AgentState, **extra_ctx: Any) -> Optional[GateResult]:
+        if self.gate is None or not self.gate.enabled:
             return None
-        return self.gate(self.ctx_builder(state))
+        ctx = self.ctx_builder(state)
+        ctx.update(extra_ctx)
+        return self.gate(ctx)
 
 
 @dataclass
@@ -64,11 +66,11 @@ class ReActLoop:
     # ------------------------------------------------------------------
     # gate helpers
     # ------------------------------------------------------------------
-    def _run_hook(self, name: str) -> Optional[GateResult]:
+    def _run_hook(self, name: str, **extra_ctx: Any) -> Optional[GateResult]:
         hook = self.hooks.get(name)
         if hook is None:
             return None
-        return hook.evaluate(self.state)
+        return hook.evaluate(self.state, **extra_ctx)
 
     # ------------------------------------------------------------------
     # main cycle
@@ -77,8 +79,17 @@ class ReActLoop:
         self.state.messages.append({"role": "user", "content": initial_prompt})
 
         # [C] Scorer gate (pre-loop): selects tier / step budget.
-        scorer_result = self._run_hook("scorer")
+        scorer_result = self._run_hook("scorer", initial_prompt=initial_prompt)
         if scorer_result is not None:
+            self.state.record_step(StepRecord(
+                step=self.state.step,
+                module="scorer",
+                decision=scorer_result.decision.value,
+                confidence=scorer_result.confidence,
+                fallback_used=scorer_result.fallback_used,
+                latency_ms=scorer_result.latency_ms,
+                raw=scorer_result.raw_output,
+            ))
             self.state.model_tier = scorer_result.decision.value
 
         while self.state.can_continue():
@@ -86,7 +97,16 @@ class ReActLoop:
             router_result = self._run_hook("router")
             call_llm = True
             if router_result is not None:
-                call_llm = router_result.decision == Decision.CALL_LLM
+                self.state.record_step(StepRecord(
+                    step=self.state.step,
+                    module="router",
+                    decision=router_result.decision.value,
+                    confidence=router_result.confidence,
+                    fallback_used=router_result.fallback_used,
+                    latency_ms=router_result.latency_ms,
+                    raw=router_result.raw_output,
+                ))
+                call_llm = (router_result.decision == Decision.CALL_LLM)
 
             tool_name: Optional[str] = None
             tool_args: Dict[str, Any] = {}
@@ -126,10 +146,30 @@ class ReActLoop:
             tool_result = self._execute_tool(tool_name, tool_args)
 
             # --- OBSERVE: firewall on tool output ---
-            firewall_result = self._run_hook("firewall")
+            user_prompt = self.state.messages[0]["content"] if self.state.messages else ""
+            firewall_result = self._run_hook(
+                "firewall",
+                tool_output=tool_result.output,
+                tool_name=tool_name,
+                user_prompt=user_prompt,
+            )
             observation = str(tool_result.output)
-            if firewall_result is not None and firewall_result.decision == Decision.REDACT:
-                observation = "[FIREWALL: Tool output redacted due to suspected injection]"
+            if firewall_result is not None:
+                self.state.record_step(StepRecord(
+                    step=self.state.step,
+                    module="firewall",
+                    decision=firewall_result.decision.value,
+                    confidence=firewall_result.confidence,
+                    fallback_used=firewall_result.fallback_used,
+                    latency_ms=firewall_result.latency_ms,
+                    tool=tool_name,
+                    tool_ok=tool_result.ok,
+                    raw=firewall_result.raw_output,
+                ))
+                if firewall_result.decision == Decision.REDACT:
+                    observation = "[FIREWALL: Tool output redacted due to suspected injection]"
+                elif "sanitized_output" in firewall_result.raw_output:
+                    observation = str(firewall_result.raw_output["sanitized_output"])
 
             self.state.messages.append({"role": "user", "content": observation})
             self.state.record_step(StepRecord(
@@ -144,8 +184,21 @@ class ReActLoop:
             ))
 
             # --- Supervisor gate (post-step) ---
-            supervisor_result = self._run_hook("supervisor")
+            supervisor_result = self._run_hook(
+                "supervisor",
+                recent_observation=observation,
+                trajectory=self.state.trajectory,
+            )
             if supervisor_result is not None:
+                self.state.record_step(StepRecord(
+                    step=self.state.step,
+                    module="supervisor",
+                    decision=supervisor_result.decision.value,
+                    confidence=supervisor_result.confidence,
+                    fallback_used=supervisor_result.fallback_used,
+                    latency_ms=supervisor_result.latency_ms,
+                    raw=supervisor_result.raw_output,
+                ))
                 if supervisor_result.decision == Decision.STOP:
                     self.state.finished = True
                     self.state.stop_reason = "supervisor_stop"
