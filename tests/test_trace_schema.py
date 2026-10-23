@@ -12,9 +12,7 @@ import os
 import sys
 import tempfile
 
-# Ensure the project root (parent of the ``laya_agent`` package) is importable
-# regardless of how pytest is invoked.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest  # noqa: E402
 

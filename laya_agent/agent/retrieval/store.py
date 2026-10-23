@@ -5,17 +5,22 @@ rules. Once :meth:`freeze` is called, all mutation methods raise
 ``StoreFrozenError`` to guarantee the policy store cannot leak test-set
 information during evaluation.
 
-A real FAISS ``IndexFlatIP`` can be substituted for ``_index``; when FAISS is
-unavailable the store falls back to exact cosine similarity over numpy vectors
-(correct and deterministic for the 40-rule store).
+A real FAISS ``IndexFlatIP`` is populated and used for inner-product
+(cosine similarity with L2-normalized vectors). When FAISS is unavailable, the
+store falls back to exact cosine similarity over NumPy vectors.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
+import yaml
+
+from laya_agent.agent.retrieval.embed import EmbeddingEncoder
 
 
 class StoreFrozenError(RuntimeError):
@@ -46,12 +51,16 @@ class PolicyStore:
         entries: Sequence[PolicyEntry],
         encoder: Optional[Any] = None,
         index: Optional[Any] = None,
+        build_index: bool = True,
     ) -> "PolicyStore":
-        return cls(
+        store = cls(
             entries=list(entries),
             _encoder=encoder,
             _index=index,
         )
+        if build_index and entries and encoder is not None:
+            store.build_index()
+        return store
 
     def freeze(self) -> None:
         """Lock the store read-only; subsequent mutations raise StoreFrozenError."""
@@ -78,6 +87,30 @@ class PolicyStore:
         self._vectors = None
 
     # ------------------------------------------------------------------
+    # indexing
+    # ------------------------------------------------------------------
+    def build_index(self) -> None:
+        """Populate vector embeddings and the FAISS IndexFlatIP index."""
+        if not self.entries or self._encoder is None:
+            return
+
+        self._vectors = np.vstack(
+            [self._encoder.encode([entry.text]) for entry in self.entries]
+        ).astype(np.float32)
+
+        try:
+            import faiss  # type: ignore
+
+            dim = int(self._vectors.shape[1])
+            index = faiss.IndexFlatIP(dim)
+            vs = self._vectors.copy().astype(np.float32)
+            faiss.normalize_L2(vs)
+            index.add(vs)
+            self._index = index
+        except ImportError:
+            self._index = None
+
+    # ------------------------------------------------------------------
     # retrieval
     # ------------------------------------------------------------------
     def search(self, query: str, top_k: int = 10) -> List[Tuple[PolicyEntry, float]]:
@@ -90,38 +123,42 @@ class PolicyStore:
                 "construct via from_entries(encoder=...)."
             )
 
-        query_vec = self._encoder.encode([query])[0]  # (dim,)
+        encoded = self._encoder.encode([query])
+        query_vec = np.asarray(encoded[0], dtype=np.float32)
 
-        # Rebuild the vector matrix if the entry set changed.
+        # Rebuild vector matrix and index if entry set changed or unindexed
         if self._vectors is None or len(self._vectors) != len(self.entries):
-            self._vectors = np.vstack(
-                [self._encoder.encode([entry.text]) for entry in self.entries]
-            )
+            self.build_index()
 
-        # Use a real FAISS index when one was provided; otherwise exact cosine
-        # similarity over numpy (equivalent for a small, static rule set).
+        # Query vector converted to a 2D float32 NumPy array: (1, dim)
+        q = query_vec.reshape(1, -1).astype(np.float32)
+
+        # Use FAISS index when available
         index = self._index
         if index is not None:
             try:
                 import faiss  # type: ignore
 
                 if isinstance(index, faiss.Index):
-                    q = query_vec.reshape(1, -1).astype(np.float32)
+                    # Normalize query vector for cosine similarity via inner product
                     faiss.normalize_L2(q)
-                    vs = self._vectors.astype(np.float32)
-                    faiss.normalize_L2(vs)
-                    scores, ids = index.search(vs, top_k)  # type: ignore[attr-defined]
-                    # Re-map: index was built over self.entries order.
-                    results = []
+                    # Pass single query vector q (1, dim) rather than entry matrix vs
+                    scores, ids = index.search(q, top_k)
+                    results: List[Tuple[PolicyEntry, float]] = []
                     for score, idx in zip(scores[0], ids[0]):
                         if idx == -1:
                             continue
                         results.append((self.entries[int(idx)], float(score)))
                     return results[:top_k]
             except ImportError:
-                pass  # fall through to numpy cosine
+                pass  # Fall through to NumPy cosine similarity
 
-        # Exact cosine similarity (deterministic, no FAISS required).
+        # Fallback: exact cosine similarity over NumPy vectors
+        if self._vectors is None:
+            self._vectors = np.vstack(
+                [self._encoder.encode([entry.text]) for entry in self.entries]
+            ).astype(np.float32)
+
         norms = np.linalg.norm(self._vectors, axis=1) + 1e-12
         qnorm = np.linalg.norm(query_vec) + 1e-12
         sims = (self._vectors @ query_vec) / (norms * qnorm)
@@ -133,4 +170,61 @@ class PolicyStore:
         return [entry.text for entry, _ in self.search(query, top_k=top_k)]
 
 
-__all__ = ["PolicyEntry", "PolicyStore", "StoreFrozenError"]
+def load_domain_rules(path: Optional[str | Path] = None) -> List[PolicyEntry]:
+    """Load the 40 frozen domain rules from policies.yaml."""
+    candidates = [
+        Path(path) if path else None,
+        Path("policies/policies.yaml"),
+        Path("laya_agent/policies/policies.yaml"),
+        Path(__file__).resolve().parent.parent.parent / "policies" / "policies.yaml",
+        Path(__file__).resolve().parent.parent.parent.parent / "policies" / "policies.yaml",
+    ]
+
+    target: Optional[Path] = None
+    for cand in candidates:
+        if cand is not None and cand.is_file():
+            target = cand
+            break
+
+    if target is None:
+        raise FileNotFoundError(
+            "Could not locate policies/policies.yaml. Ensure 40 frozen rules are authored."
+        )
+
+    with open(target, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    rules_data = data.get("rules", [])
+    entries = [
+        PolicyEntry(
+            rule_id=r["rule_id"],
+            text=r["text"],
+            suite=r["suite"],
+            domain=r.get("domain", "general"),
+        )
+        for r in rules_data
+    ]
+    return entries
+
+
+def load_default_policy_store(
+    policies_path: Optional[str | Path] = None,
+    encoder: Optional[Any] = None,
+) -> PolicyStore:
+    """Load the 40 frozen domain rules, populate the FAISS index, and lock read-only."""
+    entries = load_domain_rules(policies_path)
+    if encoder is None:
+        encoder = EmbeddingEncoder()
+
+    store = PolicyStore.from_entries(entries=entries, encoder=encoder, build_index=True)
+    store.freeze()
+    return store
+
+
+__all__ = [
+    "PolicyEntry",
+    "PolicyStore",
+    "StoreFrozenError",
+    "load_default_policy_store",
+    "load_domain_rules",
+]
