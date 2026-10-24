@@ -1,4 +1,4 @@
-"""Batch runner supporting Arm A, B, and C evaluation runs.
+"""Batch runner supporting Arm A, B, C, and D evaluation runs.
 
 Executes tasks end-to-end and emits 19-field JSONL trace records via
 ``tracing/trace.py``, including the ``commit_hash`` provenance field.
@@ -6,16 +6,22 @@ Executes tasks end-to-end and emits 19-field JSONL trace records via
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
-from laya_agent.agent.core.baseline import ArmABaseline, ArmB, ArmC, create_agent
+from laya_agent.agent.core.baseline import (
+    ArmABaseline,
+    ArmB,
+    ArmC,
+    ArmD,
+    create_agent,
+)
 from laya_agent.agent.core.state import AgentState
 from laya_agent.agent.tools.base import ToolRegistry
 from laya_agent.tracing.trace import TraceLogger
 
 
 class ArmARunner:
-    """Batch executor for Arm A, B, and C tasks."""
+    """Batch executor for Arm A, B, C, and D tasks."""
 
     def __init__(self, *, trace_path: str = "eval_arm_A_smoke.jsonl") -> None:
         self.trace_path = trace_path
@@ -32,10 +38,22 @@ class ArmARunner:
         initial_prompt: str,
         tool_registry: ToolRegistry,
         llm_client: Any,
+        policy_store: Optional[Any] = None,
+        policy_top_k: int = 10,
+        candidate_policies: Optional[Sequence[Any]] = None,
         max_steps: int = 10,
         scorer_engine: Optional[Any] = None,
+        filter_engine: Optional[Any] = None,
+        router_engine: Optional[Any] = None,
         firewall_engine: Optional[Any] = None,
         supervisor_engine: Optional[Any] = None,
+        tau_scorer: float = 0.70,
+        tau_filter: float = 0.75,
+        tau_router: float = 0.80,
+        tau_inj: float = 0.90,
+        tau_rel: float = 0.70,
+        tau_supervisor: float = 0.70,
+        seed: Optional[int] = 42,
         ground_truth_label: Optional[str] = None,
     ) -> AgentState:
         state = AgentState(
@@ -51,12 +69,23 @@ class ArmARunner:
             state=state,
             llm_client=llm_client,
             tool_registry=tool_registry,
+            policy_store=policy_store,
+            policy_top_k=policy_top_k,
             max_steps=max_steps,
             scorer_engine=scorer_engine,
+            filter_engine=filter_engine,
+            router_engine=router_engine,
             firewall_engine=firewall_engine,
             supervisor_engine=supervisor_engine,
+            tau_scorer=tau_scorer,
+            tau_filter=tau_filter,
+            tau_router=tau_router,
+            tau_inj=tau_inj,
+            tau_rel=tau_rel,
+            tau_supervisor=tau_supervisor,
+            seed=seed,
         )
-        agent.run(initial_prompt)
+        agent.run(initial_prompt, candidate_policies=candidate_policies)
 
         # Emit one trace record per trajectory step.
         ctx = state.to_trace_ctx()

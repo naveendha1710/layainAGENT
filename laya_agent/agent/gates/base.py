@@ -118,8 +118,9 @@ class Gate(ABC):
         """Evaluate the gate with timing, exception safety, and fail-open."""
         # Disabled gate: pass-through, no latency, no fallback.
         if not self.enabled:
+            default_res = self.default(ctx)
             return GateResult(
-                decision=Decision.CALL_LLM,
+                decision=default_res.decision,
                 confidence=1.0,
                 latency_ms=0.0,
                 fallback_used=False,

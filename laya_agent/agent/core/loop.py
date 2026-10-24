@@ -10,7 +10,7 @@ from __future__ import annotations
 import json as _json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from laya_agent.agent.core.state import AgentState, StepRecord
 from laya_agent.agent.gates.base import Decision, Gate, GateResult
@@ -55,12 +55,16 @@ class ReActLoop:
         hooks: Dict[str, GateHook],
         llm_client: Any,
         tool_registry: Any,
+        policy_store: Optional[Any] = None,
+        policy_top_k: int = 10,
         config: Optional[LoopConfig] = None,
     ) -> None:
         self.state = state
         self.hooks = hooks
         self.llm_client = llm_client
         self.tool_registry = tool_registry
+        self.policy_store = policy_store
+        self.policy_top_k = policy_top_k
         self.config = config or LoopConfig(max_steps=state.max_steps)
 
     # ------------------------------------------------------------------
@@ -75,7 +79,58 @@ class ReActLoop:
     # ------------------------------------------------------------------
     # main cycle
     # ------------------------------------------------------------------
-    def run(self, initial_prompt: str) -> AgentState:
+    def run(
+        self,
+        initial_prompt: str,
+        candidate_policies: Optional[Sequence[Any]] = None,
+    ) -> AgentState:
+        # [D] Policy Retrieval & Applicability Filter Gate
+        candidates = list(candidate_policies) if candidate_policies is not None else []
+        if not candidates and self.policy_store is not None:
+            raw_search = self.policy_store.search(initial_prompt, top_k=self.policy_top_k)
+            candidates = [
+                entry for entry, _ in raw_search
+            ] if raw_search and isinstance(raw_search[0], tuple) else list(raw_search)
+
+        retained_policies = []
+        for cand in candidates:
+            cand_text = cand.text if hasattr(cand, "text") else str(cand)
+            rule_id = getattr(cand, "rule_id", "rule")
+            suite = getattr(cand, "suite", "")
+            filter_result = self._run_hook(
+                "filter",
+                policy=cand,
+                policy_text=cand_text,
+                rule_id=rule_id,
+                suite=suite,
+                user_prompt=initial_prompt,
+            )
+            if filter_result is not None:
+                self.state.record_step(StepRecord(
+                    step=self.state.step,
+                    module="filter",
+                    decision=filter_result.decision.value,
+                    confidence=filter_result.confidence,
+                    fallback_used=filter_result.fallback_used,
+                    latency_ms=filter_result.latency_ms,
+                    raw=filter_result.raw_output,
+                ))
+                if filter_result.decision == Decision.KEEP:
+                    retained_policies.append(cand)
+            else:
+                # Filter hook disabled/not configured -> retain policy unconditionally (Arms A, B, C)
+                retained_policies.append(cand)
+
+        if retained_policies:
+            policy_lines = [
+                f"- [{getattr(p, 'rule_id', f'rule_{i}')}] {p.text if hasattr(p, 'text') else str(p)}"
+                for i, p in enumerate(retained_policies)
+            ]
+            self.state.messages.append({
+                "role": "system",
+                "content": "Applicable Domain Policies:\n" + "\n".join(policy_lines),
+            })
+
         self.state.messages.append({"role": "user", "content": initial_prompt})
 
         # [C] Scorer gate (pre-loop): selects tier / step budget.
@@ -99,7 +154,11 @@ class ReActLoop:
 
         while self.state.can_continue():
             # --- PLAN / reason via LLM (unless router says bypass) ---
-            router_result = self._run_hook("router")
+            router_result = self._run_hook(
+                "router",
+                messages=self.state.messages,
+                trajectory=self.state.trajectory,
+            )
             call_llm = True
             if router_result is not None:
                 self.state.record_step(StepRecord(
@@ -151,7 +210,18 @@ class ReActLoop:
                 tool_name, tool_args = parsed
             else:
                 # [D] Router bypass: deterministic follow-up, no LLM call.
-                tool_name, tool_args = self._deterministic_follow_up()
+                tool_name = (
+                    router_result.raw_output.get("tool_name")
+                    if router_result and router_result.raw_output
+                    else None
+                )
+                tool_args = (
+                    router_result.raw_output.get("tool_args", {})
+                    if router_result and router_result.raw_output
+                    else {}
+                )
+                if not tool_name:
+                    tool_name, tool_args = self._deterministic_follow_up()
 
             # --- ACT / execute tool ---
             tool_result = self._execute_tool(tool_name, tool_args)
