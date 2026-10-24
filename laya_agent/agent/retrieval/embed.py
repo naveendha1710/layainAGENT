@@ -20,11 +20,13 @@ class EmbeddingEncoder:
         model_name: str = "BAAI/bge-small-en-v1.5",
         device: Optional[str] = None,
         encoder: Optional[Any] = None,
+        normalize: bool = True,
     ) -> None:
         self.model_name = model_name
         self.device = device
         self._encoder = encoder  # dependency injection: fake encoder for tests
         self._model = None  # lazily built real model
+        self.normalize = normalize
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         """Return a ``(len(texts), dim)`` float32 array of embeddings."""
@@ -40,7 +42,10 @@ class EmbeddingEncoder:
                 ) from exc
             self._model = SentenceTransformer(self.model_name, device=self.device)
         vecs = self._model.encode(
-            list(texts), convert_to_numpy=True, show_progress_bar=False
+            list(texts),
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=self.normalize,
         )
         return np.asarray(vecs, dtype=np.float32)
 

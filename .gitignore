@@ -24,3 +24,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Benchmark / Smoke results
+results/
+*.jsonl

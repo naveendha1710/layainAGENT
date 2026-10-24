@@ -12,6 +12,7 @@ environments where the hosted-LLM dependencies are not yet installed.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import random
 import time
 import uuid
@@ -90,21 +91,44 @@ class NVIDIABuildClient:
         api_key: Optional[str] = None,
         base_url: str = "https://integrate.api.nvidia.com/v1",
         model: str = "nemotron-3.5-super-vl-120b-a12b",
+        small_model: Optional[str] = None,
         temperature: float = 0.0,
         max_retries: int = 5,
         initial_backoff_ms: int = 250,
         max_backoff_ms: int = 30000,
         client: Optional[Any] = None,
     ) -> None:
-        self.api_key = api_key or os.environ.get("NVIDIA_API_KEY", "")
+        # Resolve API key from argument, environment, or .env file
+        resolved_key = api_key or os.environ.get("NVIDIA_API_KEY", "")
+        if not resolved_key:
+            # Check local .env files
+            for p in (Path.cwd() / ".env", Path(__file__).resolve().parent.parent.parent / ".env"):
+                if p.exists() and p.is_file():
+                    with open(p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("NVIDIA_API_KEY="):
+                                resolved_key = line.split("=", 1)[1].strip().strip("'\"")
+                                break
+                if resolved_key:
+                    break
+
+        self.api_key = resolved_key
         self.base_url = base_url
         self.model = model
+        self.small_model = small_model or os.environ.get("SMALL_TIER_MODEL")
         self.temperature = temperature
         self.max_retries = max_retries
         self.initial_backoff_ms = initial_backoff_ms
         self.max_backoff_ms = max_backoff_ms
         self._client = client  # dependency injection for tests
         self._openai = None  # resolved lazily
+
+    def get_model_for_tier(self, tier: str) -> str:
+        """Resolve model name for the requested tier ('small' vs 'big')."""
+        if tier.lower() == "small" and self.small_model:
+            return self.small_model
+        return self.model
 
     @property
     def client(self) -> Any:

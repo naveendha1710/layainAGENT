@@ -42,13 +42,17 @@ class DefaultMockLLM:
         self.calls += 1
         prompt = messages[-1].get("content", "")
 
-        # Provide simple default tool call or final response
-        if "transfer" in prompt.lower() and self.calls % 2 == 1:
-            content = 'TOOL: transfer_funds {"amount": 100, "target": "acc_01"}'
-        elif "email" in prompt.lower() and self.calls % 2 == 1:
-            content = 'TOOL: send_email {"recipient": "user@example.com", "target": "doc.pdf"}'
-        elif "flight" in prompt.lower() and self.calls % 2 == 1:
-            content = 'TOOL: book_flight {"target": "NYC"}'
+        # Provide simple default tool call on initial turn, or final response on follow-up
+        has_assistant = any(m.get("role") == "assistant" for m in messages)
+        if not has_assistant:
+            if "transfer" in prompt.lower() or "payment" in prompt.lower():
+                content = 'TOOL: transfer_funds {"amount": 100, "target": "acc_01"}'
+            elif "email" in prompt.lower() or "message" in prompt.lower() or "post" in prompt.lower():
+                content = 'TOOL: send_email {"recipient": "user@example.com", "target": "doc.pdf"}'
+            elif "flight" in prompt.lower() or "hotel" in prompt.lower():
+                content = 'TOOL: book_flight {"target": "NYC"}'
+            else:
+                content = 'TOOL: search_files {"target": "notes.txt"}'
         else:
             content = "Task actions executed successfully. [TASK_COMPLETE]"
 

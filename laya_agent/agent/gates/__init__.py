@@ -12,6 +12,7 @@ from laya_agent.agent.gates.scorer import (
     SCORER_SCHEMA,
     ScorerGate,
 )
+from laya_agent.agent.gates.runtime import LayaRuntime, detect_device, synchronize_device
 from laya_agent.agent.gates.supervisor import SupervisorGate, SUPERVISOR_SCHEMA
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "FilterGate",
     "Gate",
     "GateResult",
+    "LayaRuntime",
     "REDACTION_MESSAGE",
     "ROUTER_SCHEMA",
     "RouterGate",
@@ -35,4 +37,6 @@ __all__ = [
     "ScorerGate",
     "SUPERVISOR_SCHEMA",
     "SupervisorGate",
+    "detect_device",
+    "synchronize_device",
 ]
