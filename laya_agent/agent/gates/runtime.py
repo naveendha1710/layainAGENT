@@ -15,8 +15,11 @@ in offline test environments.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
+import urllib.request
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from laya_agent.agent.gates.base import Decision
@@ -63,15 +66,43 @@ class LayaRuntime:
         model_name: str = "answerdotai/ModernBERT-large",
         device: Optional[str] = None,
         load_weights: bool = False,
+        api_url: Optional[str] = None,
     ) -> None:
         self.model_name = model_name
         self.device = detect_device(device)
         self.load_weights = load_weights
+        self.api_url = (api_url or os.environ.get("LAYA_API_URL", "")).strip().rstrip("/")
         self._model = None
         self._tokenizer = None
 
-        if self.load_weights:
+        if self.load_weights and not self.api_url:
             self._init_live_model()
+
+    def _call_remote(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        timeout: float = 5.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Call remote LAYA server (e.g. running on Google Colab GPU via ngrok/localtunnel)."""
+        if not self.api_url:
+            return None
+        import json
+        import urllib.request
+        try:
+            url = f"{self.api_url}/{endpoint.lstrip('/')}"
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json", "User-Agent": "LAYA-Agent-Client/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        return None
 
     def _init_live_model(self) -> None:
         """Lazily initialize ModernBERT model weights with exception fallback."""
@@ -238,6 +269,15 @@ class LayaRuntime:
     ) -> Dict[str, Any]:
         """Generic prediction hook compatible with all gate schema evaluators."""
         ctx = ctx or {}
+
+        # Remote Colab / tunnel dispatch if api_url is configured
+        if self.api_url:
+            remote_resp = self._call_remote(
+                "predict",
+                {"text": text, "schema": schema, "ctx": ctx},
+            )
+            if remote_resp and isinstance(remote_resp, dict):
+                return remote_resp
 
         # 1. Scorer Gate Schema
         if schema == SCORER_SCHEMA or "model_tier" in (schema or {}):

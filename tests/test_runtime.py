@@ -158,3 +158,27 @@ def test_runtime_supervisor_schema() -> None:
         schema=SUPERVISOR_SCHEMA,
     )
     assert res["status"]["choice"] == "stop"
+
+
+def test_runtime_remote_endpoint_dispatch_and_fallback() -> None:
+    # 1. Unreachable remote endpoint -> graceful fallback to local heuristic
+    runtime = LayaRuntime(api_url="http://127.0.0.1:59999")
+    assert runtime.api_url == "http://127.0.0.1:59999"
+
+    # Should fall back cleanly without raising connection errors
+    res = runtime.predict(
+        "Check account balance and transfer $500",
+        schema=SCORER_SCHEMA,
+    )
+    assert "model_tier" in res
+    assert res["model_tier"]["choice"] in {"small", "big"}
+
+    # 2. Mocked successful remote endpoint
+    runtime_mock = LayaRuntime(api_url="https://mock-colab.ngrok-free.app")
+    runtime_mock._call_remote = lambda endpoint, payload: {  # type: ignore[method-assign]
+        "model_tier": {"choice": "small", "confidence": 0.99}
+    }
+    mock_res = runtime_mock.predict("Any complex prompt", schema=SCORER_SCHEMA)
+    assert mock_res["model_tier"]["choice"] == "small"
+    assert mock_res["model_tier"]["confidence"] == 0.99
+
