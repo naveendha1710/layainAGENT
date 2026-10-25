@@ -56,6 +56,13 @@ class AgentState:
     total_llm_calls: int = 0
     total_gate_latency_ms: float = 0.0
 
+    def get_user_prompt(self) -> str:
+        """Find the original user prompt from messages."""
+        for m in self.messages:
+            if m.get("role") == "user":
+                return m.get("content", "")
+        return self.messages[0]["content"] if self.messages else ""
+
     def record_step(self, record: StepRecord) -> None:
         self.trajectory.append(record)
         self.step += 1

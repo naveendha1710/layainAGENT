@@ -7,7 +7,9 @@ are present in every arm but active only when their mode flag in
 
 from __future__ import annotations
 
+import inspect
 import json as _json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -121,6 +123,34 @@ class ReActLoop:
                 # Filter hook disabled/not configured -> retain policy unconditionally (Arms A, B, C)
                 retained_policies.append(cand)
 
+        # Build strict ReAct system instructions with tool descriptions
+        tool_specs = self.tool_registry.specs() if hasattr(self.tool_registry, "specs") else {}
+        tool_names = ", ".join(tool_specs.keys())
+        tool_descriptions = "\n".join(
+            f"- {name}: {spec.description}" for name, spec in tool_specs.items()
+        )
+        react_system_prompt = (
+            f"Answer the following questions as best you can. You have access to the following tools:\n"
+            f"{tool_descriptions}\n\n"
+            f"Use the following format:\n"
+            f"Thought: you should always think about what to do\n"
+            f"Action: the action to take, should be one of [{tool_names}]\n"
+            f"Action Input: the input to the action\n"
+            f"Observation: the result of the action\n"
+            f"... (this Thought/Action/Action Input/Observation can repeat N times)\n"
+            f"Thought: I now know the final answer\n"
+            f"Final Answer: the final answer to the original input question"
+        )
+        has_react_prompt = any(
+            m.get("role") == "system" and "You have access to the following tools:" in m.get("content", "")
+            for m in self.state.messages
+        )
+        if not has_react_prompt:
+            self.state.messages.append({
+                "role": "system",
+                "content": react_system_prompt,
+            })
+
         if retained_policies:
             policy_lines = [
                 f"- [{getattr(p, 'rule_id', f'rule_{i}')}] {p.text if hasattr(p, 'text') else str(p)}"
@@ -227,7 +257,7 @@ class ReActLoop:
             tool_result = self._execute_tool(tool_name, tool_args)
 
             # --- OBSERVE: firewall on tool output ---
-            user_prompt = self.state.messages[0]["content"] if self.state.messages else ""
+            user_prompt = self.state.get_user_prompt()
             firewall_result = self._run_hook(
                 "firewall",
                 tool_output=tool_result.output,
@@ -302,21 +332,155 @@ class ReActLoop:
     # tool parsing / execution
     # ------------------------------------------------------------------
     def _parse_tool_call(self, content: str) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Parse ``TOOL: <name> <json_args>`` from LLM text."""
+        """Robustly parse tool name and arguments from LLM text.
+
+        Supports:
+          1. Legacy TOOL format:
+             TOOL: <name> <json_args>
+          2. ReAct format (supporting markdown code fences ``` or ```json, extra whitespace):
+             Thought: ...
+             Action: <name>
+             Action Input: <args>
+          3. Direct function-call / JSON format:
+             {"tool": "...", "args": ...} or read_file(...)
+          4. Fallback regex matching against known tool names in ToolRegistry when model
+             omits strict prefixes.
+        """
+        if not content or not content.strip():
+            return None
+
+        # 1. Check for legacy TOOL: prefix
         marker = "TOOL:"
         idx = content.find(marker)
-        if idx < 0:
+        if idx >= 0:
+            line = content[idx + len(marker):].strip()
+            parts = line.split(None, 1)
+            if parts:
+                name = parts[0].strip()
+                args: Dict[str, Any] = {}
+                if len(parts) > 1:
+                    raw_arg = parts[1].strip()
+                    try:
+                        args = _json.loads(raw_arg)
+                    except (_json.JSONDecodeError, ValueError):
+                        args = {"target": raw_arg.strip("'\"")}
+                return name, self._normalize_args(name, args)
+
+        # 2. Check for ReAct Action: / Action Input: format
+        action_match = re.search(
+            r"(?:^|\n)\s*(?:\*{1,2})?Action(?:\*{1,2})?\s*:\s*[`\"']*([a-zA-Z0-9_]+)[`\"']*",
+            content,
+            re.IGNORECASE,
+        )
+        if action_match:
+            name = action_match.group(1).strip()
+            input_match = re.search(
+                r"(?:^|\n)\s*(?:\*{1,2})?Action\s+Input(?:\*{1,2})?\s*:\s*(.*)",
+                content,
+                re.IGNORECASE | re.DOTALL,
+            )
+            raw_input = input_match.group(1).strip() if input_match else ""
+
+            # Truncate at subsequent ReAct keywords
+            for stop in ["\nObservation:", "\nThought:", "\nFinal Answer:"]:
+                pos = raw_input.find(stop)
+                if pos != -1:
+                    raw_input = raw_input[:pos].strip()
+
+            # Strip markdown code blocks (``` or ```json)
+            fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_input, re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                raw_input = fence_match.group(1).strip()
+            elif raw_input.startswith("```") and raw_input.endswith("```"):
+                raw_input = raw_input.strip("`").strip()
+
+            args: Dict[str, Any] = {}
+            if raw_input:
+                try:
+                    parsed_json = _json.loads(raw_input)
+                    if isinstance(parsed_json, dict):
+                        args = parsed_json
+                    else:
+                        args = {"target": parsed_json}
+                except (_json.JSONDecodeError, ValueError):
+                    clean_input = raw_input.strip()
+                    if (clean_input.startswith("'") and clean_input.endswith("'")) or (
+                        clean_input.startswith('"') and clean_input.endswith('"')
+                    ):
+                        clean_input = clean_input[1:-1].strip()
+                    if "=" in clean_input and not clean_input.startswith("{"):
+                        kvs = re.findall(r"([a-zA-Z0-9_]+)\s*=\s*['\"]?([^'\",\n]+)['\"]?", clean_input)
+                        if kvs:
+                            args = {k: v.strip() for k, v in kvs}
+                        else:
+                            args = {"target": clean_input}
+                    else:
+                        args = {"target": clean_input}
+            return name, self._normalize_args(name, args)
+
+        # 3. If explicit Final Answer is present without Action/TOOL, finish loop
+        if re.search(r"(?:^|\n)\s*(?:\*{1,2})?Final\s+Answer(?:\*{1,2})?\s*:", content, re.IGNORECASE):
             return None
-        line = content[idx + len(marker):].strip()
-        parts = line.split(None, 1)
-        name = parts[0]
-        args: Dict[str, Any] = {}
-        if len(parts) > 1:
-            try:
-                args = _json.loads(parts[1])
-            except _json.JSONDecodeError:
-                args = {"_raw": parts[1]}
-        return name, args
+
+        # 4. Fallback: regex matching against known tool names in ToolRegistry
+        known_tools = (
+            set(self.tool_registry.specs().keys())
+            if hasattr(self.tool_registry, "specs")
+            else set()
+        )
+        if known_tools:
+            # Check for JSON block containing tool name
+            json_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if json_block:
+                try:
+                    data = _json.loads(json_block.group(1))
+                    cand_tool = data.get("tool") or data.get("name") or data.get("action")
+                    if cand_tool and cand_tool in known_tools:
+                        tool_args = (
+                            data.get("args")
+                            or data.get("arguments")
+                            or data.get("parameters")
+                            or data.get("action_input")
+                            or {}
+                        )
+                        if isinstance(tool_args, dict):
+                            return cand_tool, self._normalize_args(cand_tool, tool_args)
+                        return cand_tool, self._normalize_args(cand_tool, {"target": str(tool_args)})
+                except Exception:
+                    pass
+
+            # Check for function call syntax: tool_name(...)
+            for tool in sorted(known_tools, key=len, reverse=True):
+                call_match = re.search(rf"\b{tool}\s*\((.*?)\)", content, re.DOTALL)
+                if call_match:
+                    inside = call_match.group(1).strip()
+                    arg_dict: Dict[str, Any] = {}
+                    if "=" in inside:
+                        for k, v in re.findall(r"([a-zA-Z0-9_]+)\s*=\s*['\"]?([^'\",\n]+)['\"]?", inside):
+                            arg_dict[k] = v.strip()
+                    elif inside:
+                        arg_dict = {"target": inside.strip("'\"")}
+                    return tool, self._normalize_args(tool, arg_dict)
+
+            # Check for natural mention of known tool: e.g. "use the read_file tool on 'inbox.txt'"
+            for tool in sorted(known_tools, key=len, reverse=True):
+                if re.search(rf"\b(?:use|using|call|invoke|execute)?\s*(?:the\s+)?{tool}\b", content, re.IGNORECASE):
+                    q_match = re.search(r"['\"]([a-zA-Z0-9_.-]+\.[a-zA-Z0-9]{2,4})['\"]", content)
+                    target = q_match.group(1) if q_match else ""
+                    args = {"target": target} if target else {}
+                    return tool, self._normalize_args(tool, args)
+
+        return None
+
+    def _normalize_args(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize parameter aliases to target or appropriate tool signature."""
+        normalized = dict(args)
+        if "target" not in normalized:
+            for alias in ["file", "filename", "path", "query", "url", "channel"]:
+                if alias in normalized:
+                    normalized["target"] = normalized[alias]
+                    break
+        return normalized
 
     def _deterministic_follow_up(self) -> Tuple[str, Dict[str, Any]]:
         """Router bypass: deterministic no-op follow-up requiring no LLM."""
@@ -325,7 +489,19 @@ class ReActLoop:
     def _execute_tool(self, name: str, args: Dict[str, Any]) -> ToolResult:
         t0 = time.perf_counter()
         try:
-            result = self.tool_registry.execute(name, **args)
+            call_args = dict(args)
+            if hasattr(self.tool_registry, "specs"):
+                spec = self.tool_registry.specs().get(name)
+                if spec and hasattr(spec, "fn"):
+                    sig = inspect.signature(spec.fn)
+                    params = list(sig.parameters.keys())
+                    # If tool accepts no arguments (e.g. confirm_action, list_files)
+                    if not params:
+                        call_args = {}
+                    elif len(params) == 1 and params[0] not in call_args and call_args:
+                        call_args = {params[0]: next(iter(call_args.values()))}
+
+            result = self.tool_registry.execute(name, **call_args)
             return ToolResult(output=str(result), ok=True, latency_ms=(time.perf_counter() - t0) * 1000.0)
         except Exception as exc:  # noqa: BLE001 - capture tool errors as observations
             return ToolResult(output=str(exc), ok=False, latency_ms=(time.perf_counter() - t0) * 1000.0)

@@ -93,7 +93,7 @@ class ArmB:
                 gate=firewall_gate,
                 ctx_builder=lambda st: {
                     "state": st,
-                    "user_prompt": st.messages[0]["content"] if st.messages else "",
+                    "user_prompt": st.get_user_prompt(),
                 },
             ),
             "supervisor": GateHook(
@@ -173,7 +173,7 @@ class ArmC:
                 gate=scorer_gate,
                 ctx_builder=lambda st: {
                     "state": st,
-                    "initial_prompt": st.messages[0]["content"] if st.messages else "",
+                    "initial_prompt": st.get_user_prompt(),
                 },
             ),
             "firewall": GateHook(
@@ -181,7 +181,7 @@ class ArmC:
                 gate=firewall_gate,
                 ctx_builder=lambda st: {
                     "state": st,
-                    "user_prompt": st.messages[0]["content"] if st.messages else "",
+                    "user_prompt": st.get_user_prompt(),
                 },
             ),
             "supervisor": GateHook(
@@ -277,7 +277,7 @@ class ArmD:
                 gate=scorer_gate,
                 ctx_builder=lambda st: {
                     "state": st,
-                    "initial_prompt": st.messages[0]["content"] if st.messages else "",
+                    "initial_prompt": st.get_user_prompt(),
                 },
             ),
             "filter": GateHook(
@@ -301,7 +301,7 @@ class ArmD:
                 gate=firewall_gate,
                 ctx_builder=lambda st: {
                     "state": st,
-                    "user_prompt": st.messages[0]["content"] if st.messages else "",
+                    "user_prompt": st.get_user_prompt(),
                 },
             ),
             "supervisor": GateHook(

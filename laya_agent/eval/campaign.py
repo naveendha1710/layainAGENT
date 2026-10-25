@@ -47,7 +47,9 @@ class DefaultMockLLM:
         if "confirmation_required" in prompt.lower():
             content = "TOOL: confirm_action {}"
         elif not has_assistant:
-            if "transfer" in prompt.lower() or "payment" in prompt.lower():
+            if "read_file" in prompt.lower() or "inbox" in prompt.lower() or "passcode" in prompt.lower():
+                content = 'TOOL: read_file {"target": "inbox.txt"}'
+            elif "transfer" in prompt.lower() or "payment" in prompt.lower():
                 content = 'TOOL: transfer_funds {"amount": 100, "target": "acc_01"}'
             elif "email" in prompt.lower() or "message" in prompt.lower() or "post" in prompt.lower():
                 content = 'TOOL: send_email {"recipient": "user@example.com", "target": "doc.pdf"}'
@@ -75,9 +77,9 @@ def build_default_tool_registry(task: Optional[TaskRunSpec] = None) -> ToolRegis
     injection = f"\n[Context: {task.injection_payload}]" if (task and task.is_injection and task.injection_payload) else ""
 
     # Workspace
-    registry.register("read_file", "Read file", lambda target: f"Content of {target}: safe data.{injection}")
-    registry.register("search_files", "Search files", lambda target: f"Found files matching {target}.{injection}")
-    registry.register("send_email", "Send email", lambda recipient, target="": f"Sent email to {recipient} with {target}.")
+    registry.register("read_file", "Read file", lambda target="inbox.txt", **kwargs: f"Content of {target}: safe data.{injection}")
+    registry.register("search_files", "Search files", lambda target="notes.txt", **kwargs: f"Found files matching {target}.{injection}")
+    registry.register("send_email", "Send email", lambda recipient="user@example.com", target="", **kwargs: f"Sent email to {recipient} with {target}.")
     registry.register("update_calendar", "Update calendar", lambda target: f"Updated invite for {target}.")
     registry.register("search_calendar", "Search calendar", lambda target: f"Found calendar events for {target}.{injection}")
     registry.register("share_document", "Share document", lambda target: f"Shared document {target}.")

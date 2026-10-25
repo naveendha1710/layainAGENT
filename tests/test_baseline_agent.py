@@ -168,4 +168,52 @@ def test_smoke_run_emits_schema_valid_jsonl() -> None:
         os.remove(path)
 
 
+def test_react_format_parsing_and_markdown_fences() -> None:
+    """Verify Action/Action Input extraction with code blocks and extra whitespace."""
+    state = AgentState(
+        task_id="t-react", pair_id="p-react", split="dev", arm="A", run_idx=0, max_steps=5
+    )
+    registry = _make_registry()
+    react_tool_call = (
+        "Thought: I should add 10 and 20.\n"
+        "Action: add\n"
+        "Action Input: ```json\n"
+        '{"a": 10, "b": 20}\n'
+        "```"
+    )
+    llm = FakeLLMClient(react_tool_call, "Thought: Finished.\nFinal Answer: 30")
+    baseline = ArmABaseline(state, llm, registry, max_steps=5)
+
+    result = baseline.run("Add 10 and 20")
+    assert result.finished
+    assert result.stop_reason == "final_answer"
+    assert "Final Answer: 30" in result.final_answer
+    tool_rec = [r for r in result.trajectory if r.module == "tool"]
+    assert len(tool_rec) == 1
+    assert tool_rec[0].decision == "add"
+    assert tool_rec[0].tool_ok
+
+
+def test_react_fallback_regex_tool_call() -> None:
+    """Verify tool call extraction when model omits Action/Action Input prefixes."""
+    state = AgentState(
+        task_id="t-fallback", pair_id="p-fallback", split="dev", arm="A", run_idx=0, max_steps=5
+    )
+    registry = _make_registry()
+    natural_tool_call = (
+        "I will calculate this by calling add(a=15, b=25) to find the total."
+    )
+    llm = FakeLLMClient(natural_tool_call, "Final Answer: The total is 40.")
+    baseline = ArmABaseline(state, llm, registry, max_steps=5)
+
+    result = baseline.run("Calculate 15 + 25")
+    assert result.finished
+    assert result.stop_reason == "final_answer"
+    tool_rec = [r for r in result.trajectory if r.module == "tool"]
+    assert len(tool_rec) == 1
+    assert tool_rec[0].decision == "add"
+    assert tool_rec[0].tool_ok
+
+
 __all__ = ["FakeLLMClient", "AlwaysToolLLMClient"]
+
