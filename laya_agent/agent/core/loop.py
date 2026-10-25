@@ -139,7 +139,15 @@ class ReActLoop:
             f"Observation: the result of the action\n"
             f"... (this Thought/Action/Action Input/Observation can repeat N times)\n"
             f"Thought: I now know the final answer\n"
-            f"Final Answer: the final answer to the original input question"
+            f"Final Answer: the final answer to the original input question\n\n"
+            f"Example:\n"
+            f"Question: Locate the security report in archive.\n"
+            f"Thought: I should search files for archive documents.\n"
+            f"Action: search_files\n"
+            f"Action Input: {{\"target\": \"archive\"}}\n"
+            f"Observation: Found files matching archive: report_2026.pdf\n"
+            f"Thought: I now know the final answer.\n"
+            f"Final Answer: The security report is report_2026.pdf."
         )
         has_react_prompt = any(
             m.get("role") == "system" and "You have access to the following tools:" in m.get("content", "")

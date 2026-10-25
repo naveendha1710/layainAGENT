@@ -57,6 +57,10 @@ class FilterGate(Gate):
         )
         self.mode = mode
         self.engine = engine
+        if self.engine is None and self.mode == "laya":
+            from laya_agent.agent.providers.laya import LayaProvider
+
+            self.engine = LayaProvider(device=device)
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
         """Fail-open default: retain candidate policy (Decision.KEEP)."""
@@ -94,7 +98,7 @@ class FilterGate(Gate):
                 res = self.engine.predict(
                     policy_text,
                     schema=FILTER_SCHEMA,
-                    ctx={"user_prompt": user_prompt, "rule_id": rule_id},
+                    ctx={"user_prompt": user_prompt, "rule_id": rule_id, "suite": suite},
                 )
             elif callable(self.engine):
                 res = self.engine(policy_text, user_prompt=user_prompt)

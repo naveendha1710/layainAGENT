@@ -129,13 +129,45 @@ class LayaRuntime:
         t0 = time.perf_counter()
 
         prompt_lower = prompt.lower()
-        complex_signals = [
-            "transfer", "wire", "balance", "recurring", "invest", "cross-service",
-            "multi-step", "complex", "ambiguous", "dependency", "security",
+        big_patterns = [
+            r"transfer",
+            r"wire",
+            r"balance.*and.*transact",
+            r"recurring",
+            r"plan",
+            r"coordinate",
+            r"schedule.*meeting.*external",
+            r"export.*archive",
+            r"invoice",
+            r"budget",
+            r"book.*flight",
+            r"cancel.*reservation",
+            r"admin",
+            r"exfiltrate",
+            r"multi-step",
+            r"follow-up",
+            r"perform.*follow",
         ]
-        is_complex = any(k in prompt_lower for k in complex_signals) or len(prompt.split()) > 25
-        decision = Decision.BIG if is_complex else Decision.SMALL
-        confidence = 0.95 if is_complex else 0.88
+        small_patterns = [
+            r"^find\s+file",
+            r"^read\s+",
+            r"^check\s+balance",
+            r"^get\s+status",
+            r"^what\s+is",
+            r"^look\s*up",
+            r"^search\s+",
+            r"^compute\s+\d+\s*\+",
+            r"^simple\s+query",
+        ]
+        is_big = any(re.search(pat, prompt_lower) for pat in big_patterns)
+        is_small = any(re.search(pat, prompt_lower) for pat in small_patterns)
+        if len(prompt.split()) > 20:
+            is_big = True
+
+        if is_small and not is_big:
+            decision, confidence = Decision.SMALL, 0.92
+        else:
+            decision, confidence = Decision.BIG, 0.95
 
         synchronize_device(self.device)
         _ = (time.perf_counter() - t0) * 1000.0
@@ -249,11 +281,23 @@ class LayaRuntime:
         t0 = time.perf_counter()
 
         obs_lower = recent_observation.lower()
+        reason = "normal_progress"
         if "[task_complete]" in obs_lower or "completed successfully" in obs_lower:
             decision, confidence = Decision.STOP, 0.99
+            reason = "goal_completed"
         else:
-            decision, confidence = Decision.CONTINUE, 0.90
+            recent_tools = [
+                getattr(r, "tool", None) or (r.get("tool") if isinstance(r, dict) else None)
+                for r in trajectory
+                if (getattr(r, "module", None) == "tool" or (isinstance(r, dict) and r.get("module") == "tool"))
+            ]
+            if len(recent_tools) >= 3 and len(set(recent_tools[-3:])) == 1 and recent_tools[-1] is not None:
+                decision, confidence = Decision.NUDGE, 0.95
+                reason = "detected_repeated_tool_loop"
+            else:
+                decision, confidence = Decision.CONTINUE, 0.90
 
+        self._last_supervisor_reason = reason
         synchronize_device(self.device)
         _ = (time.perf_counter() - t0) * 1000.0
         return decision, confidence
@@ -330,13 +374,21 @@ class LayaRuntime:
 
         # 5. Supervisor Schema
         if schema == SUPERVISOR_SCHEMA or "status" in (schema or {}):
-            traj = ctx.get("trajectory", [])
-            dec, conf = self.supervise_step(traj, recent_observation=text)
+            traj = ctx.get("trajectory", []) if isinstance(ctx, dict) else []
+            obs = ""
+            if isinstance(text, str):
+                obs = text
+            elif isinstance(text, dict):
+                obs = text.get("recent_observation", "") or text.get("last_observation", "")
+                if not traj:
+                    traj = text.get("trajectory", [])
+            dec, conf = self.supervise_step(traj, recent_observation=obs)
             return {
                 "status": {
                     "choice": dec.value,
                     "confidence": conf,
-                }
+                },
+                "reason": getattr(self, "_last_supervisor_reason", "normal_progress"),
             }
 
         return {}

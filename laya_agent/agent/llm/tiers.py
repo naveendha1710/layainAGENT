@@ -1,9 +1,9 @@
 """Model-tier resolution for the dual-tier hosted LLM client.
 
-Big Tier (default: ``nemotron-3.5-super-vl-120b-a12b``) and Small Tier (a
-7B/8B instruction model) are parameterized via ``configs/arms.yaml`` and
-overridable through ``BIG_TIER_MODEL`` / ``SMALL_TIER_MODEL`` environment
-variables. Environment variables take precedence over YAML values.
+Big Tier (default: ``meta/llama-3.1-70b-instruct``) and Small Tier (a
+7B/8B instruction model, default: ``meta/llama-3.1-8b-instruct``) are parameterized via
+``configs/arms.yaml`` and overridable through ``BIG_TIER_MODEL`` / ``SMALL_TIER_MODEL``
+environment variables. Environment variables take precedence over YAML values.
 """
 
 from __future__ import annotations

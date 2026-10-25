@@ -46,6 +46,10 @@ class SupervisorGate(Gate):
         )
         self.mode = mode
         self.engine = engine
+        if self.engine is None and self.mode == "laya":
+            from laya_agent.agent.providers.laya import LayaProvider
+
+            self.engine = LayaProvider(device=device)
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
         """Fail-open utility fallback returning Decision.CONTINUE."""

@@ -57,6 +57,10 @@ class ScorerGate(Gate):
         self.small_max_steps = small_max_steps
         self.big_max_steps = big_max_steps
         self.engine = engine
+        if self.engine is None and self.mode == "laya":
+            from laya_agent.agent.providers.laya import LayaProvider
+
+            self.engine = LayaProvider(device=device)
         self._rng = random.Random(seed) if seed is not None else random.Random()
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:

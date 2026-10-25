@@ -49,6 +49,10 @@ class RouterGate(Gate):
         )
         self.mode = mode
         self.engine = engine
+        if self.engine is None and self.mode == "laya":
+            from laya_agent.agent.providers.laya import LayaProvider
+
+            self.engine = LayaProvider(device=device)
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
         """Fail-open default: call hosted LLM (Decision.CALL_LLM)."""
@@ -74,6 +78,23 @@ class RouterGate(Gate):
                 raw_output={"action": "call_llm", "mode": "off"},
             )
 
+        # 1. Explicit bypass context overrides for unit & integration testing
+        if ctx.get("force_bypass") or ctx.get("deterministic_tool"):
+            tool_name = ctx.get("deterministic_tool", "confirm_step")
+            tool_args = ctx.get("deterministic_args", {})
+            return GateResult(
+                decision=Decision.BYPASS_LLM,
+                confidence=0.95,
+                latency_ms=0.0,
+                fallback_used=False,
+                raw_output={
+                    "action": "bypass_llm",
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "reason": "explicit_deterministic_action",
+                },
+            )
+
         messages = ctx.get("messages", [])
         trajectory = ctx.get("trajectory", [])
         recent_obs = str(ctx.get("recent_observation", ""))
@@ -91,7 +112,11 @@ class RouterGate(Gate):
                 res = self.engine.predict(
                     prompt_summary,
                     schema=ROUTER_SCHEMA,
-                    ctx={"trajectory_len": len(trajectory)},
+                    ctx={
+                        "trajectory_len": len(trajectory),
+                        "messages": messages,
+                        "recent_observation": recent_obs,
+                    },
                 )
             elif callable(self.engine):
                 res = self.engine(prompt_summary, ctx=ctx)

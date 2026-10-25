@@ -89,8 +89,8 @@ class NVIDIABuildClient:
         self,
         *,
         api_key: Optional[str] = None,
-        base_url: str = "https://integrate.api.nvidia.com/v1",
-        model: str = "nemotron-3.5-super-vl-120b-a12b",
+        base_url: Optional[str] = None,
+        model: str = "meta/llama-3.1-70b-instruct",
         small_model: Optional[str] = None,
         temperature: float = 0.0,
         max_retries: int = 5,
@@ -114,7 +114,10 @@ class NVIDIABuildClient:
                     break
 
         self.api_key = resolved_key
-        self.base_url = base_url
+        raw_base_url = (base_url or os.environ.get("NVIDIA_BUILD_BASE_URL", "https://integrate.api.nvidia.com/v1")).rstrip("/")
+        if not raw_base_url.endswith("/v1"):
+            raw_base_url += "/v1"
+        self.base_url = raw_base_url
         self.model = model
         self.small_model = small_model or os.environ.get("SMALL_TIER_MODEL")
         self.temperature = temperature
@@ -126,9 +129,9 @@ class NVIDIABuildClient:
 
     def get_model_for_tier(self, tier: str) -> str:
         """Resolve model name for the requested tier ('small' vs 'big')."""
-        if tier.lower() == "small" and self.small_model:
-            return self.small_model
-        return self.model
+        if tier.lower() == "small":
+            return os.environ.get("SMALL_TIER_MODEL", self.small_model or "meta/llama-3.1-8b-instruct")
+        return os.environ.get("BIG_TIER_MODEL", self.model or "meta/llama-3.1-70b-instruct")
 
     @property
     def client(self) -> Any:
