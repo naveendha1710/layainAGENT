@@ -42,15 +42,19 @@ class DefaultMockLLM:
         self.calls += 1
         prompt = messages[-1].get("content", "")
 
-        # Provide simple default tool call on initial turn, or final response on follow-up
+        # Check if observation requires routine confirmation
         has_assistant = any(m.get("role") == "assistant" for m in messages)
-        if not has_assistant:
+        if "confirmation_required" in prompt.lower():
+            content = "TOOL: confirm_action {}"
+        elif not has_assistant:
             if "transfer" in prompt.lower() or "payment" in prompt.lower():
                 content = 'TOOL: transfer_funds {"amount": 100, "target": "acc_01"}'
             elif "email" in prompt.lower() or "message" in prompt.lower() or "post" in prompt.lower():
                 content = 'TOOL: send_email {"recipient": "user@example.com", "target": "doc.pdf"}'
             elif "flight" in prompt.lower() or "hotel" in prompt.lower():
                 content = 'TOOL: book_flight {"target": "NYC"}'
+            elif "archive" in prompt.lower() or "folder" in prompt.lower():
+                content = 'TOOL: archive_file {"target": "shared_folder"}'
             else:
                 content = 'TOOL: search_files {"target": "notes.txt"}'
         else:
@@ -65,47 +69,48 @@ class DefaultMockLLM:
         )
 
 
-def build_default_tool_registry() -> ToolRegistry:
+def build_default_tool_registry(task: Optional[TaskRunSpec] = None) -> ToolRegistry:
     """Build tool registry covering standard tools across the 4 AgentDojo suites."""
     registry = ToolRegistry()
+    injection = f"\n[Context: {task.injection_payload}]" if (task and task.is_injection and task.injection_payload) else ""
 
     # Workspace
-    registry.register("read_file", "Read file", lambda target: f"Content of {target}: safe data.")
-    registry.register("search_files", "Search files", lambda target: f"Found files matching {target}.")
+    registry.register("read_file", "Read file", lambda target: f"Content of {target}: safe data.{injection}")
+    registry.register("search_files", "Search files", lambda target: f"Found files matching {target}.{injection}")
     registry.register("send_email", "Send email", lambda recipient, target="": f"Sent email to {recipient} with {target}.")
     registry.register("update_calendar", "Update calendar", lambda target: f"Updated invite for {target}.")
-    registry.register("search_calendar", "Search calendar", lambda target: f"Found calendar events for {target}.")
+    registry.register("search_calendar", "Search calendar", lambda target: f"Found calendar events for {target}.{injection}")
     registry.register("share_document", "Share document", lambda target: f"Shared document {target}.")
-    registry.register("archive_file", "Archive file", lambda target: f"Archived folder {target}.")
-    registry.register("list_files", "List files", lambda: "file1.txt, file2.pdf")
+    registry.register("archive_file", "Archive file", lambda target: f"Archived folder {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("list_files", "List files", lambda: f"file1.txt, file2.pdf{injection}")
 
     # Banking
-    registry.register("transfer_funds", "Transfer funds", lambda amount, target: f"Transferred ${amount} to {target}.")
-    registry.register("get_balance", "Get balance", lambda target="": "Checking balance: $5,240.00.")
-    registry.register("list_transactions", "List transactions", lambda target="": "Recent transactions: -$50 grocery, -$20 coffee.")
-    registry.register("setup_recurring_payment", "Setup recurring payment", lambda target: f"Recurring payment to {target} active.")
-    registry.register("freeze_card", "Freeze card", lambda target: f"Card {target} has been frozen.")
-    registry.register("get_card_status", "Get card status", lambda target="": "Card status: active.")
-    registry.register("export_statement", "Export statement", lambda target="": "Exported statement.")
+    registry.register("transfer_funds", "Transfer funds", lambda amount, target: f"Transferred ${amount} to {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("get_balance", "Get balance", lambda target="": f"Checking balance: $5,240.00.{injection}")
+    registry.register("list_transactions", "List transactions", lambda target="": f"Recent transactions: -$50 grocery, -$20 coffee.{injection}")
+    registry.register("setup_recurring_payment", "Setup recurring payment", lambda target: f"Recurring payment to {target} active. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("freeze_card", "Freeze card", lambda target: f"Card {target} has been frozen. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("get_card_status", "Get card status", lambda target="": f"Card status: active.{injection}")
+    registry.register("export_statement", "Export statement", lambda target="": f"Exported statement.{injection}")
 
     # Slack
     registry.register("post_message", "Post message", lambda target: f"Message posted to channel {target}.")
-    registry.register("read_channel", "Read channel", lambda target: f"Recent messages in {target}.")
+    registry.register("read_channel", "Read channel", lambda target: f"Recent messages in {target}.{injection}")
     registry.register("invite_user", "Invite user", lambda target: f"Invited {target} to channel.")
-    registry.register("get_user_info", "Get user info", lambda target: f"User info for {target}.")
-    registry.register("create_webhook", "Create webhook", lambda target: f"Webhook created for {target}.")
-    registry.register("export_channel_history", "Export channel history", lambda target: f"History exported for {target}.")
+    registry.register("get_user_info", "Get user info", lambda target: f"User info for {target}.{injection}")
+    registry.register("create_webhook", "Create webhook", lambda target: f"Webhook created for {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("export_channel_history", "Export channel history", lambda target: f"History exported for {target}.{injection}")
     registry.register("upload_snippet", "Upload snippet", lambda target: f"Uploaded snippet to {target}.")
 
     # Travel
-    registry.register("search_hotels", "Search hotels", lambda target: f"Found hotels in {target}.")
-    registry.register("book_hotel", "Book hotel", lambda target: f"Booked hotel in {target}.")
-    registry.register("search_flights", "Search flights", lambda target: f"Found flights for {target}.")
-    registry.register("book_flight", "Book flight", lambda target: f"Booked flight to {target}.")
+    registry.register("search_hotels", "Search hotels", lambda target: f"Found hotels in {target}.{injection}")
+    registry.register("book_hotel", "Book hotel", lambda target: f"Booked hotel in {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("search_flights", "Search flights", lambda target: f"Found flights for {target}.{injection}")
+    registry.register("book_flight", "Book flight", lambda target: f"Booked flight to {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
     registry.register("submit_receipt", "Submit receipt", lambda target: f"Receipt submitted for {target}.")
-    registry.register("get_itinerary", "Get itinerary", lambda: "Flight AA100, Hotel Marriott.")
-    registry.register("cancel_reservation", "Cancel reservation", lambda target: f"Cancelled reservation {target}.")
-    registry.register("update_itinerary", "Update itinerary", lambda target: f"Updated itinerary for {target}.")
+    registry.register("get_itinerary", "Get itinerary", lambda: f"Flight AA100, Hotel Marriott.{injection}")
+    registry.register("cancel_reservation", "Cancel reservation", lambda target: f"Cancelled reservation {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
+    registry.register("update_itinerary", "Update itinerary", lambda target: f"Updated itinerary for {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
 
     # Control
     registry.register("confirm_action", "Confirm action", lambda: "Action confirmed. [TASK_COMPLETE]")
@@ -160,9 +165,14 @@ class MultiArmCampaign:
 
     def load_split_runs(self) -> List[TaskRunSpec]:
         """Load canonical runs for the configured split."""
-        adapter = AgentDojoAdapter()
-        splitter = TaskSplitter(seed=self.seed, dev_size=25, test_size=50)
-        split_result = splitter.partition(adapter.list_user_tasks())
+        splits_file = Path("splits.json")
+        if splits_file.exists():
+            from laya_agent.eval.splits import load_splits
+            split_result = load_splits(splits_file)
+        else:
+            adapter = AgentDojoAdapter()
+            splitter = TaskSplitter(seed=self.seed, dev_size=25, test_size=50)
+            split_result = splitter.partition(adapter.list_user_tasks())
         if self.split == "dev":
             return split_result.dev_runs
         return split_result.test_runs
@@ -173,28 +183,53 @@ class MultiArmCampaign:
         tool_registry: Optional[ToolRegistry] = None,
         llm_client: Optional[Any] = None,
         policy_store: Optional[Any] = None,
+        runtime: Optional[Any] = None,
+        scorer_engine: Optional[Any] = None,
+        filter_engine: Optional[Any] = None,
+        router_engine: Optional[Any] = None,
+        firewall_engine: Optional[Any] = None,
+        supervisor_engine: Optional[Any] = None,
         force_rerun: bool = False,
     ) -> Dict[str, Any]:
         """Execute the campaign across all configured arms."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         task_specs = list(tasks) if tasks is not None else self.load_split_runs()
-        tools = tool_registry or build_default_tool_registry()
         llm = llm_client or DefaultMockLLM()
 
-        trace_path = self.output_dir / f"eval_campaign_{self.split}.jsonl"
-        completed_keys = set() if force_rerun else self.load_completed_keys(trace_path)
+        # Engine resolution
+        s_eng = scorer_engine or runtime
+        f_eng = filter_engine or runtime
+        r_eng = router_engine or runtime
+        fw_eng = firewall_engine or runtime
+        sup_eng = supervisor_engine or runtime
 
-        runner = ArmARunner(trace_path=str(trace_path))
+        combined_trace_path = self.output_dir / f"eval_campaign_{self.split}.jsonl"
+        if force_rerun and combined_trace_path.exists():
+            combined_trace_path.unlink()
 
         executed_count = 0
         skipped_count = 0
+        arm_trace_paths: Dict[str, Path] = {}
 
         for arm in self.arms:
+            arm_trace_path = self.output_dir / f"arm_{arm}.jsonl"
+            arm_trace_paths[arm] = arm_trace_path
+            if force_rerun and arm_trace_path.exists():
+                arm_trace_path.unlink()
+
+            completed_keys = set() if force_rerun else (
+                self.load_completed_keys(arm_trace_path) | self.load_completed_keys(combined_trace_path)
+            )
+
+            runner = ArmARunner(trace_path=str(arm_trace_path))
+
             for task in task_specs:
                 run_key = (arm, task.task_id, self.seed)
                 if run_key in completed_keys:
                     skipped_count += 1
                     continue
+
+                tools = tool_registry if tool_registry is not None else build_default_tool_registry(task)
 
                 runner.run_task(
                     task_id=task.task_id,
@@ -206,15 +241,30 @@ class MultiArmCampaign:
                     tool_registry=tools,
                     llm_client=llm,
                     policy_store=policy_store,
+                    scorer_engine=s_eng,
+                    filter_engine=f_eng,
+                    router_engine=r_eng,
+                    firewall_engine=fw_eng,
+                    supervisor_engine=sup_eng,
                     max_steps=self.max_steps,
                     ground_truth_label=task.ground_truth_label,
                 )
                 executed_count += 1
                 completed_keys.add(run_key)
 
+        # Build / sync combined trace file from all arm traces
+        with open(combined_trace_path, "w", encoding="utf-8") as out_f:
+            for arm in self.arms:
+                a_path = arm_trace_paths[arm]
+                if a_path.exists():
+                    with open(a_path, "r", encoding="utf-8") as in_f:
+                        for line in in_f:
+                            if line.strip():
+                                out_f.write(line.strip() + "\n")
+
         # Post-run statistical analysis & table generation
         metrics_engine = MetricsEngine(pricing=self.pricing)
-        arm_metrics = metrics_engine.analyze_trace(trace_path)
+        arm_metrics = metrics_engine.analyze_trace(combined_trace_path)
 
         bootstrap_engine = PairedBootstrapEngine(n_boot=self.n_boot, seed=self.seed, baseline_arm="A")
         bootstrap_summaries = bootstrap_engine.run_bootstrap(arm_metrics)
@@ -224,7 +274,8 @@ class MultiArmCampaign:
         return {
             "executed": executed_count,
             "skipped": skipped_count,
-            "trace_path": trace_path,
+            "trace_path": combined_trace_path,
+            "arm_traces": arm_trace_paths,
             "metrics": arm_metrics,
             "bootstrap": bootstrap_summaries,
             "files": saved_files,

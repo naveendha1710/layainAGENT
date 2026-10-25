@@ -207,7 +207,15 @@ class MetricsEngine:
                         records.append(json.loads(line))
         else:
             for item in source:
-                if isinstance(item, TraceRecord):
+                if isinstance(item, (str, Path)):
+                    p = Path(item)
+                    if p.exists():
+                        with open(p, "r", encoding="utf-8") as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if line:
+                                    records.append(json.loads(line))
+                elif isinstance(item, TraceRecord):
                     records.append(item.model_dump())
                 elif hasattr(item, "to_dict"):
                     records.append(item.to_dict())
