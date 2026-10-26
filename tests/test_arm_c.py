@@ -45,9 +45,19 @@ class MockDualTierLLM:
             return "mock-small-tier"
         return "mock-big-tier"
 
-    def chat_complete(self, messages: List[Dict[str, str]], model: Optional[str] = None, **kwargs: Any) -> LLMResponse:
+    def chat_complete(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        tier: Optional[str] = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
         self.calls += 1
-        model_name = model or "mock-big-tier"
+        effective_tier = tier or (model if model in ("big", "small") else None)
+        if effective_tier:
+            model_name = self.get_model_for_tier(effective_tier)
+        else:
+            model_name = model or "mock-big-tier"
         self.recorded_models.append(model_name)
 
         if self.tool_call and self.calls == 1:

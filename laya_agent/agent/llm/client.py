@@ -145,14 +145,29 @@ class NVIDIABuildClient:
     def chat_complete(
         self,
         messages: Sequence[Dict[str, str]],
-        *,
         model: Optional[str] = None,
+        tier: Optional[str] = None,
         temperature: Optional[float] = None,
         timeout: Optional[float] = None,
+        **kwargs: Any,
     ) -> LLMResponse:
         """Run a chat completion with retry/backoff and latency tracking."""
-        model = model or self.model
+        # Resolve requested tier
+        effective_tier = tier or (model if model in ("big", "small") else None)
+
+        if effective_tier:
+            target_model = self.get_model_for_tier(effective_tier)
+        elif model and model not in ("big", "small"):
+            target_model = model
+        else:
+            target_model = self.get_model_for_tier("big")
+
+        # Safety guard: ensure the string sent over HTTP is never literally 'big' or 'small'
+        if target_model in ("big", "small"):
+            target_model = self.get_model_for_tier(target_model)
+
         temperature = self.temperature if temperature is None else temperature
+        timeout = timeout if timeout is not None else kwargs.get("timeout")
         start = time.perf_counter()
         last_error: Optional[Exception] = None
         backoff_ms = self.initial_backoff_ms
@@ -160,7 +175,7 @@ class NVIDIABuildClient:
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.client.chat.completions.create(
-                    model=model,
+                    model=target_model,
                     messages=list(messages),
                     temperature=temperature,
                     timeout=timeout,
@@ -174,7 +189,7 @@ class NVIDIABuildClient:
                     content = ""
                 return LLMResponse(
                     content=content,
-                    model=getattr(response, "model", model),
+                    model=getattr(response, "model", target_model),
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     latency_ms=latency_ms,

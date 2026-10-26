@@ -214,11 +214,14 @@ class ReActLoop:
             tool_args: Dict[str, Any] = {}
 
             if call_llm:
-                model_kwarg = {}
-                if hasattr(self.llm_client, "get_model_for_tier"):
-                    model_kwarg["model"] = self.llm_client.get_model_for_tier(self.state.model_tier)
-                elif hasattr(self.llm_client, "small_model") and self.state.model_tier == "small":
-                    model_kwarg["model"] = self.llm_client.small_model
+                model_kwarg = {"tier": self.state.model_tier} if self.state.model_tier else {}
+                try:
+                    sig = inspect.signature(self.llm_client.chat_complete)
+                    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if not has_kwargs and "tier" not in sig.parameters:
+                        model_kwarg = {"model": self.state.model_tier} if self.state.model_tier else {}
+                except Exception:
+                    pass
 
                 t0 = time.perf_counter()
                 response = self.llm_client.chat_complete(self.state.messages, **model_kwarg)

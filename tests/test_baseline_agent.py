@@ -34,7 +34,7 @@ class FakeLLMClient:
         self.final = final
         self.calls = 0
 
-    def chat_complete(self, messages, *, model=None, temperature=None, timeout=None):  # noqa: ARG002,ANN001
+    def chat_complete(self, messages, *, model=None, temperature=None, timeout=None, **kwargs):  # noqa: ARG002,ANN001
         import time as _time
 
         t0 = _time.perf_counter()
@@ -52,7 +52,7 @@ class FakeLLMClient:
 class AlwaysToolLLMClient(FakeLLMClient):
     """Fake LLM that always emits a TOOL call (forces max-step termination)."""
 
-    def chat_complete(self, messages, *, model=None, temperature=None, timeout=None):  # noqa: ARG002,ANN001
+    def chat_complete(self, messages, *, model=None, temperature=None, timeout=None, **kwargs):  # noqa: ARG002,ANN001
         import time as _time
 
         t0 = _time.perf_counter()
