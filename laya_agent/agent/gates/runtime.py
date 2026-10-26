@@ -65,18 +65,36 @@ class LayaRuntime:
         self,
         model_name: str = "answerdotai/ModernBERT-large",
         device: Optional[str] = None,
-        load_weights: bool = False,
+        load_weights: Optional[bool] = None,
         api_url: Optional[str] = None,
     ) -> None:
         self.model_name = model_name
+        if device is None:
+            try:
+                import torch
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                device = "cpu"
         self.device = detect_device(device)
-        self.load_weights = load_weights
+
+        if load_weights is None:
+            load_weights = (self.device == "cuda")
+        self.load_weights = bool(load_weights)
         self.api_url = (api_url or os.environ.get("LAYA_API_URL", "")).strip().rstrip("/")
         self._model = None
         self._tokenizer = None
 
         if self.load_weights and not self.api_url:
             self._init_live_model()
+
+    @property
+    def model(self) -> Any:
+        return self._model
+
+    @model.setter
+    def model(self, value: Any) -> None:
+        self._model = value
 
     def _call_remote(
         self,
@@ -105,8 +123,9 @@ class LayaRuntime:
         return None
 
     def _init_live_model(self) -> None:
-        """Lazily initialize ModernBERT model weights with exception fallback."""
+        """Lazily initialize ModernBERT model weights directly to self.device."""
         try:
+            import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer  # type: ignore
 
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -115,10 +134,34 @@ class LayaRuntime:
                 num_labels=2,
             ).to(self.device)
             self._model.eval()
-        except Exception:
-            # Fall back to lightweight offline engine if download/cuda fails
+        except Exception as exc:
             self._model = None
             self._tokenizer = None
+            if self.device == "cuda":
+                raise RuntimeError(
+                    f"Failed to load {self.model_name} on {self.device}: {exc}"
+                ) from exc
+
+    def _forward_pass(self, text: str) -> Tuple[int, float]:
+        """Execute real PyTorch forward pass on CUDA/GPU with tokenization."""
+        if self._model is None or self._tokenizer is None:
+            return 0, 0.0
+        import torch
+
+        inputs = self._tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=False,
+        ).to(self.device)
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=-1)
+            pred_class = int(torch.argmax(probs, dim=-1).item())
+            confidence = float(probs[0, pred_class].item())
+        return pred_class, confidence
 
     # ------------------------------------------------------------------
     # 1. Scorer Gate ([C])
@@ -127,6 +170,10 @@ class LayaRuntime:
         """Score task prompt: 'small' (low complexity) vs. 'big' (multi-step/risk)."""
         synchronize_device(self.device)
         t0 = time.perf_counter()
+
+        pred_class = None
+        if self.load_weights and self.model is not None:
+            pred_class, _ = self._forward_pass(prompt)
 
         prompt_lower = prompt.lower()
         big_patterns = [
@@ -159,7 +206,7 @@ class LayaRuntime:
             r"^compute\s+\d+\s*\+",
             r"^simple\s+query",
         ]
-        is_big = any(re.search(pat, prompt_lower) for pat in big_patterns)
+        is_big = any(re.search(pat, prompt_lower) for pat in big_patterns) or (pred_class == 1)
         is_small = any(re.search(pat, prompt_lower) for pat in small_patterns)
         if len(prompt.split()) > 20:
             is_big = True
@@ -190,6 +237,9 @@ class LayaRuntime:
         p_lower = p_text.lower()
         prompt_lower = prompt.lower()
 
+        if self.load_weights and self.model is not None:
+            self._forward_pass(f"Policy: {p_text} | Task: {prompt}")
+
         if "[drop]" in p_lower or "[noise]" in p_lower or "[irrelevant]" in p_lower:
             decision, confidence = Decision.DROP, 0.95
         elif "[keep]" in p_lower or "[relevant]" in p_lower:
@@ -219,6 +269,10 @@ class LayaRuntime:
         """Evaluate pre-LLM execution bypass: 'bypass_llm' vs 'call_llm'."""
         synchronize_device(self.device)
         t0 = time.perf_counter()
+
+        if self.load_weights and self.model is not None:
+            input_summary = recent_observation or (messages[0]["content"] if messages else "")
+            self._forward_pass(input_summary)
 
         obs_lower = recent_observation.lower()
         if (
@@ -252,6 +306,9 @@ class LayaRuntime:
         synchronize_device(self.device)
         t0 = time.perf_counter()
 
+        if self.load_weights and self.model is not None:
+            self._forward_pass(chunk)
+
         c_lower = chunk.lower()
         has_injection = bool(
             REGEX_INJECTION_PATTERN.search(chunk)
@@ -280,6 +337,9 @@ class LayaRuntime:
         synchronize_device(self.device)
         t0 = time.perf_counter()
 
+        if self.load_weights and self.model is not None:
+            self._forward_pass(recent_observation or "step")
+
         obs_lower = recent_observation.lower()
         reason = "normal_progress"
         if "[task_complete]" in obs_lower or "completed successfully" in obs_lower:
@@ -301,6 +361,8 @@ class LayaRuntime:
         synchronize_device(self.device)
         _ = (time.perf_counter() - t0) * 1000.0
         return decision, confidence
+
+    supervise_loop = supervise_step
 
     # ------------------------------------------------------------------
     # Universal Gate Engine Interface (predict)

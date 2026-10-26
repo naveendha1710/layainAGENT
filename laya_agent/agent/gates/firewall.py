@@ -62,6 +62,7 @@ class ContextFirewall(Gate):
         chunk_overlap: int = 0,
         engine: Optional[Any] = None,
         device: str = "cuda",
+        load_weights: Optional[bool] = None,
     ) -> None:
         super().__init__(
             name="firewall",
@@ -74,11 +75,12 @@ class ContextFirewall(Gate):
         self.mode = mode
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.load_weights = load_weights
         self.engine = engine
         if self.engine is None and self.mode == "laya":
             from laya_agent.agent.providers.laya import LayaProvider
 
-            self.engine = LayaProvider(device=device)
+            self.engine = LayaProvider(device=device, load_weights=load_weights)
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
         """Fail-open utility fallback returning unredacted tool output."""

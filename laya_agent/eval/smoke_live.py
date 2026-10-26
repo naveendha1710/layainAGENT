@@ -33,6 +33,7 @@ def run_live_smoke(
     output_dir: Optional[Path] = None,
     api_key: Optional[str] = None,
     force_mock_llm: bool = False,
+    load_weights: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Execute live-wire smoke verification on 1 user-task triplet."""
     temp_dir_obj = None
@@ -53,8 +54,9 @@ def run_live_smoke(
     print(f"      Loaded {len(policy_store.entries)} frozen rules. Index ready: {policy_store._index is not None}")
 
     # 2. Initialize Local ModernBERT Gate Runtime
-    print("[2/5] Initializing local ModernBERT gate runtime...")
-    runtime = LayaRuntime()
+    target_load_weights = True if load_weights is None else load_weights
+    print(f"[2/5] Initializing local ModernBERT gate runtime (load_weights={target_load_weights})...")
+    runtime = LayaRuntime(load_weights=target_load_weights)
     print(f"      Runtime initialized on device: {runtime.device}")
 
     # 3. Resolve LLM client
@@ -115,6 +117,7 @@ def run_live_smoke(
             supervisor_engine=runtime,
             max_steps=10,
             ground_truth_label=spec.ground_truth_label,
+            load_weights=target_load_weights,
         )
         assert state.finished, f"Task {spec.task_id} did not finish cleanly."
         run_states.append(state)

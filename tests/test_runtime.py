@@ -182,3 +182,40 @@ def test_runtime_remote_endpoint_dispatch_and_fallback() -> None:
     assert mock_res["model_tier"]["choice"] == "small"
     assert mock_res["model_tier"]["confidence"] == 0.99
 
+
+def test_runtime_load_weights_behavior() -> None:
+    # 1. On CPU, load_weights defaults to False
+    runtime_cpu = LayaRuntime(device="cpu")
+    assert runtime_cpu.load_weights is False
+    assert runtime_cpu.model is None
+
+    # 2. Explicit load_weights=False
+    runtime_explicit = LayaRuntime(device="cpu", load_weights=False)
+    assert runtime_explicit.load_weights is False
+
+    # 3. Simulate model attachment and forward pass execution
+    import torch
+
+    class FakeTokenizer:
+        def __call__(self, text, **kwargs):
+            class FakeBatch:
+                def to(self, device):
+                    return {"input_ids": torch.tensor([[101, 102]])}
+            return FakeBatch()
+
+    class FakeModel:
+        def __call__(self, **kwargs):
+            class FakeOutput:
+                logits = torch.tensor([[2.5, 0.5]])
+            return FakeOutput()
+
+    runtime_with_model = LayaRuntime(device="cpu", load_weights=False)
+    runtime_with_model.load_weights = True
+    runtime_with_model.model = FakeModel()
+    runtime_with_model._tokenizer = FakeTokenizer()
+
+    # Score task should invoke forward pass
+    dec, conf = runtime_with_model.score_task("Inspect inbox")
+    assert dec in {Decision.SMALL, Decision.BIG}
+    assert 0.0 <= conf <= 1.0
+

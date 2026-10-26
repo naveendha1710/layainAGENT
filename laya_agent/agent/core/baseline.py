@@ -71,6 +71,7 @@ class ArmB:
         tau_inj: float = 0.90,
         tau_rel: float = 0.70,
         tau_supervisor: float = 0.70,
+        load_weights: Optional[bool] = None,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
@@ -80,11 +81,13 @@ class ArmB:
             tau_rel=tau_rel,
             mode=firewall_mode,
             engine=firewall_engine,
+            load_weights=load_weights,
         )
         supervisor_gate = SupervisorGate(
             tau=tau_supervisor,
             mode=supervisor_mode,
             engine=supervisor_engine,
+            load_weights=load_weights,
         )
 
         hooks: Dict[str, GateHook] = {
@@ -145,6 +148,7 @@ class ArmC:
         tau_rel: float = 0.70,
         tau_supervisor: float = 0.70,
         seed: Optional[int] = 42,
+        load_weights: Optional[bool] = None,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
@@ -154,17 +158,20 @@ class ArmC:
             mode=scorer_mode,
             engine=scorer_engine,
             seed=seed,
+            load_weights=load_weights,
         )
         firewall_gate = ContextFirewall(
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             mode=firewall_mode,
             engine=firewall_engine,
+            load_weights=load_weights,
         )
         supervisor_gate = SupervisorGate(
             tau=tau_supervisor,
             mode=supervisor_mode,
             engine=supervisor_engine,
+            load_weights=load_weights,
         )
 
         hooks: Dict[str, GateHook] = {
@@ -239,6 +246,7 @@ class ArmD:
         tau_rel: float = 0.70,
         tau_supervisor: float = 0.70,
         seed: Optional[int] = 42,
+        load_weights: Optional[bool] = None,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
@@ -248,27 +256,32 @@ class ArmD:
             mode=scorer_mode,
             engine=scorer_engine,
             seed=seed,
+            load_weights=load_weights,
         )
         filter_gate = FilterGate(
             tau=tau_filter,
             mode=filter_mode,
             engine=filter_engine,
+            load_weights=load_weights,
         )
         router_gate = RouterGate(
             tau=tau_router,
             mode=router_mode,
             engine=router_engine,
+            load_weights=load_weights,
         )
         firewall_gate = ContextFirewall(
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             mode=firewall_mode,
             engine=firewall_engine,
+            load_weights=load_weights,
         )
         supervisor_gate = SupervisorGate(
             tau=tau_supervisor,
             mode=supervisor_mode,
             engine=supervisor_engine,
+            load_weights=load_weights,
         )
 
         hooks: Dict[str, GateHook] = {
@@ -351,6 +364,7 @@ def create_agent(
     tau_rel: float = 0.70,
     tau_supervisor: float = 0.70,
     seed: Optional[int] = 42,
+    load_weights: Optional[bool] = None,
 ) -> Any:
     """Factory creating the appropriate agent controller for the requested arm."""
     arm_key = arm.strip()
@@ -379,6 +393,7 @@ def create_agent(
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
+            load_weights=load_weights,
         )
     elif arm_key in {"B", "b"}:
         return ArmB(
@@ -395,6 +410,7 @@ def create_agent(
             tau_inj=tau_inj,
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
+            load_weights=load_weights,
         )
     elif arm_key.lower() == "c_always_small":
         return ArmC(
@@ -415,6 +431,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
     elif arm_key.lower() == "c_random":
         return ArmC(
@@ -435,6 +452,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
     elif arm_key in {"C", "c"}:
         return ArmC(
@@ -455,6 +473,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
     elif arm_key in {"D", "d"}:
         return ArmD(
@@ -481,6 +500,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
     else:
         # Default fallback to Arm D (Full LAYA)
@@ -508,6 +528,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
 
 

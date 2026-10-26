@@ -40,6 +40,7 @@ class RouterGate(Gate):
         mode: str = "laya",  # "laya" | "off"
         engine: Optional[Any] = None,
         device: str = "cuda",
+        load_weights: Optional[bool] = None,
     ) -> None:
         super().__init__(
             name="router",
@@ -48,11 +49,12 @@ class RouterGate(Gate):
             device=device,
         )
         self.mode = mode
+        self.load_weights = load_weights
         self.engine = engine
         if self.engine is None and self.mode == "laya":
             from laya_agent.agent.providers.laya import LayaProvider
 
-            self.engine = LayaProvider(device=device)
+            self.engine = LayaProvider(device=device, load_weights=load_weights)
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
         """Fail-open default: call hosted LLM (Decision.CALL_LLM)."""

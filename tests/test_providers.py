@@ -92,3 +92,16 @@ def test_laya_provider_raises_when_no_fallback() -> None:
     # If fallback_to_mock=False and laya cannot be imported, should raise Exception
     with pytest.raises(Exception):
         _ = LayaProvider(device="cpu", fallback_to_mock=False)
+
+
+def test_laya_provider_prevents_silent_fallback_on_load_weights_true() -> None:
+    # When load_weights=True or running on CUDA, silent fallback to MockProvider is disabled
+    with pytest.raises(RuntimeError):
+        _ = LayaProvider(device="cpu", fallback_to_mock=True, load_weights=True)
+
+
+def test_mock_provider_load_weights_forwarding() -> None:
+    provider = MockProvider(device="cpu", load_weights=False)
+    assert provider.load_weights is False
+    assert provider.runtime.load_weights is False
+

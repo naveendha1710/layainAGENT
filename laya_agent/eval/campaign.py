@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from laya_agent.analysis.bootstrap import PairedBootstrapEngine
 from laya_agent.analysis.metrics import MetricsEngine
@@ -134,6 +134,7 @@ class MultiArmCampaign:
         max_steps: int = 10,
         n_boot: int = 2000,
         pricing: Optional[Dict[str, Dict[str, float]]] = None,
+        load_weights: Optional[bool] = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.arms = list(arms)
@@ -142,6 +143,7 @@ class MultiArmCampaign:
         self.max_steps = int(max_steps)
         self.n_boot = int(n_boot)
         self.pricing = pricing
+        self.load_weights = load_weights
 
     def load_completed_keys(self, trace_path: Path) -> Set[Tuple[str, str, int]]:
         """Load set of completed (arm, task_id, run_idx) tuples from existing JSONL trace."""
@@ -191,6 +193,7 @@ class MultiArmCampaign:
         router_engine: Optional[Any] = None,
         firewall_engine: Optional[Any] = None,
         supervisor_engine: Optional[Any] = None,
+        load_weights: Optional[bool] = None,
         force_rerun: bool = False,
     ) -> Dict[str, Any]:
         """Execute the campaign across all configured arms."""
@@ -204,6 +207,8 @@ class MultiArmCampaign:
         r_eng = router_engine or runtime
         fw_eng = firewall_engine or runtime
         sup_eng = supervisor_engine or runtime
+
+        effective_load_weights = load_weights if load_weights is not None else self.load_weights
 
         combined_trace_path = self.output_dir / f"eval_campaign_{self.split}.jsonl"
         if force_rerun and combined_trace_path.exists():
@@ -224,6 +229,13 @@ class MultiArmCampaign:
             )
 
             runner = ArmARunner(trace_path=str(arm_trace_path))
+
+            if effective_load_weights is not None:
+                arm_load_weights = effective_load_weights
+            else:
+                import torch
+                # Default to load_weights=True on CUDA for live gate arms B, C, D
+                arm_load_weights = True if (torch.cuda.is_available() and arm.upper() in {"B", "C", "D"}) else False
 
             for task in task_specs:
                 run_key = (arm, task.task_id, self.seed)
@@ -250,6 +262,7 @@ class MultiArmCampaign:
                     supervisor_engine=sup_eng,
                     max_steps=self.max_steps,
                     ground_truth_label=task.ground_truth_label,
+                    load_weights=arm_load_weights,
                 )
                 executed_count += 1
                 completed_keys.add(run_key)

@@ -41,8 +41,15 @@ class LayaProvider(BaseProvider):
         device: Optional[str] = None,
         router: Optional[Any] = None,
         fallback_to_mock: bool = True,
+        load_weights: Optional[bool] = None,
     ) -> None:
+        import torch
+
         self.device = detect_device(device)
+        is_cuda_available = (self.device == "cuda" and torch.cuda.is_available())
+        if load_weights is None:
+            load_weights = is_cuda_available
+        self.load_weights = load_weights
         self.fallback_to_mock = fallback_to_mock
         self._mock_provider: Optional[MockProvider] = None
         self.router = router
@@ -53,13 +60,18 @@ class LayaProvider(BaseProvider):
 
     def _init_router(self) -> None:
         """Attempt to instantiate or retrieve laya.Router with fallback to mock."""
+        import torch
+
+        is_cuda = (self.device == "cuda" and torch.cuda.is_available())
         try:
             self.router = get_router(self.device)
-        except Exception:
-            if self.fallback_to_mock:
-                self._mock_provider = MockProvider(device=self.device)
-            else:
-                raise
+        except Exception as exc:
+            if is_cuda or self.load_weights or not self.fallback_to_mock:
+                raise RuntimeError(
+                    f"Failed to initialize laya.Router on {self.device}: {exc}. "
+                    "Silent fallback to MockProvider is disabled for CUDA live runs."
+                ) from exc
+            self._mock_provider = MockProvider(device=self.device, load_weights=self.load_weights)
 
     def predict(
         self,

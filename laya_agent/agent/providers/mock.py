@@ -11,9 +11,10 @@ from laya_agent.agent.providers.base import BaseProvider
 class MockProvider(BaseProvider):
     """Offline deterministic provider utilizing LayaRuntime heuristics."""
 
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(self, device: str = "cpu", load_weights: Optional[bool] = None) -> None:
         self.device = device
-        self.runtime = LayaRuntime(device=device, load_weights=False)
+        self.load_weights = False if load_weights is None else load_weights
+        self.runtime = LayaRuntime(device=device, load_weights=self.load_weights)
 
     def predict(
         self,

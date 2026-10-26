@@ -55,6 +55,7 @@ class ArmARunner:
         tau_supervisor: float = 0.70,
         seed: Optional[int] = 42,
         ground_truth_label: Optional[str] = None,
+        load_weights: Optional[bool] = None,
     ) -> AgentState:
         state = AgentState(
             task_id=task_id,
@@ -84,6 +85,7 @@ class ArmARunner:
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             seed=seed,
+            load_weights=load_weights,
         )
         agent.run(initial_prompt, candidate_policies=candidate_policies)
 

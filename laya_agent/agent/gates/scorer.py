@@ -46,6 +46,7 @@ class ScorerGate(Gate):
         engine: Optional[Any] = None,
         seed: Optional[int] = 42,
         device: str = "cuda",
+        load_weights: Optional[bool] = None,
     ) -> None:
         super().__init__(
             name="scorer",
@@ -56,11 +57,12 @@ class ScorerGate(Gate):
         self.mode = mode
         self.small_max_steps = small_max_steps
         self.big_max_steps = big_max_steps
+        self.load_weights = load_weights
         self.engine = engine
         if self.engine is None and self.mode == "laya":
             from laya_agent.agent.providers.laya import LayaProvider
 
-            self.engine = LayaProvider(device=device)
+            self.engine = LayaProvider(device=device, load_weights=load_weights)
         self._rng = random.Random(seed) if seed is not None else random.Random()
 
     def default(self, ctx: Dict[str, Any]) -> GateResult:
