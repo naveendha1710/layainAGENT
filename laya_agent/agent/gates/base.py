@@ -131,6 +131,9 @@ class Gate(ABC):
         try:
             result = self._evaluate(ctx)
         except Exception:  # noqa: BLE001 - exception-safe fallback is required
+            import sys
+            import traceback
+            traceback.print_exc(file=sys.stderr)
             result = self.default(ctx)
             result.fallback_used = True
 

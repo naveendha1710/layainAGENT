@@ -122,13 +122,16 @@ def build_default_tool_registry(task: Optional[TaskRunSpec] = None) -> ToolRegis
     return registry
 
 
+ALL_ARMS: List[str] = ["A", "B_regex", "B", "C_always_small", "C_random", "C", "D"]
+
+
 class MultiArmCampaign:
     """Orchestrates multi-arm benchmark evaluations with checkpoint resume."""
 
     def __init__(
         self,
         output_dir: Union[str, Path] = "results",
-        arms: Sequence[str] = ("A", "B", "C", "D"),
+        arms: Sequence[str] = ("A", "B_regex", "B", "C_always_small", "C_random", "C", "D"),
         split: str = "dev",
         seed: int = 42,
         max_steps: int = 10,
@@ -137,7 +140,10 @@ class MultiArmCampaign:
         load_weights: Optional[bool] = None,
     ) -> None:
         self.output_dir = Path(output_dir)
-        self.arms = list(arms)
+        if list(arms) == ["all"] or "all" in arms:
+            self.arms = list(ALL_ARMS)
+        else:
+            self.arms = list(arms)
         self.split = split.lower()
         self.seed = int(seed)
         self.max_steps = int(max_steps)
@@ -195,20 +201,46 @@ class MultiArmCampaign:
         supervisor_engine: Optional[Any] = None,
         load_weights: Optional[bool] = None,
         force_rerun: bool = False,
+        max_tasks: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute the campaign across all configured arms."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         task_specs = list(tasks) if tasks is not None else self.load_split_runs()
+        if max_tasks is not None and max_tasks > 0:
+            seen_pairs: Set[str] = set()
+            filtered_specs: List[TaskRunSpec] = []
+            for spec in task_specs:
+                if spec.pair_id not in seen_pairs:
+                    if len(seen_pairs) >= max_tasks:
+                        continue
+                    seen_pairs.add(spec.pair_id)
+                filtered_specs.append(spec)
+            task_specs = filtered_specs
+
         llm = llm_client or DefaultMockLLM()
+        effective_load_weights = load_weights if load_weights is not None else self.load_weights
+
+        # Device & Provider discovery & logging
+        try:
+            import torch
+            cuda_avail = torch.cuda.is_available()
+        except ImportError:
+            cuda_avail = False
+
+        device = "cuda" if cuda_avail else "cpu"
+        provider_name = "LayaProvider" if cuda_avail else "MockProvider"
+        print(f"Runner initialized using Provider: {provider_name} on device: {device}")
 
         # Engine resolution
+        if runtime is None and cuda_avail:
+            from laya_agent.agent.gates.runtime import LayaRuntime
+            runtime = LayaRuntime(load_weights=effective_load_weights)
+
         s_eng = scorer_engine or runtime
         f_eng = filter_engine or runtime
         r_eng = router_engine or runtime
         fw_eng = firewall_engine or runtime
         sup_eng = supervisor_engine or runtime
-
-        effective_load_weights = load_weights if load_weights is not None else self.load_weights
 
         combined_trace_path = self.output_dir / f"eval_campaign_{self.split}.jsonl"
         if force_rerun and combined_trace_path.exists():
@@ -235,7 +267,7 @@ class MultiArmCampaign:
             else:
                 import torch
                 # Default to load_weights=True on CUDA for live gate arms B, C, D
-                arm_load_weights = True if (torch.cuda.is_available() and arm.upper() in {"B", "C", "D"}) else False
+                arm_load_weights = True if (torch.cuda.is_available() and arm.upper() in {"B", "B_REGEX", "C", "C_ALWAYS_SMALL", "C_RANDOM", "D"}) else False
 
             for task in task_specs:
                 run_key = (arm, task.task_id, self.seed)
@@ -300,7 +332,8 @@ class MultiArmCampaign:
 def main() -> None:
     parser = argparse.ArgumentParser(description="LAYA Multi-Arm Evaluation Campaign")
     parser.add_argument("--split", choices=["dev", "test"], default="dev", help="Benchmark split to evaluate")
-    parser.add_argument("--arms", nargs="+", default=["A", "B", "C", "D"], help="List of arms to evaluate")
+    parser.add_argument("--arms", nargs="+", default=ALL_ARMS, help="List of arms to evaluate (or 'all')")
+    parser.add_argument("--max-tasks", type=int, default=None, help="Maximum number of user tasks to evaluate per arm")
     parser.add_argument("--output-dir", default="results", help="Directory to save traces and report tables")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for task partitioning and bootstrap")
     parser.add_argument("--n-boot", type=int, default=2000, help="Number of bootstrap resamples")
@@ -309,15 +342,17 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    arms = ALL_ARMS if (args.arms == ["all"] or "all" in args.arms) else args.arms
+
     campaign = MultiArmCampaign(
         output_dir=args.output_dir,
-        arms=args.arms,
+        arms=arms,
         split=args.split,
         seed=args.seed,
         max_steps=args.max_steps,
         n_boot=args.n_boot,
     )
-    result = campaign.run(force_rerun=args.force_rerun)
+    result = campaign.run(force_rerun=args.force_rerun, max_tasks=args.max_tasks)
     print(f"Campaign completed. Executed: {result['executed']}, Skipped: {result['skipped']}")
     print(f"Traces written to: {result['trace_path']}")
     for name, path in result["files"].items():

@@ -59,7 +59,7 @@ def synchronize_device(device: str) -> None:
 
 
 class LayaRuntime:
-    """Local inference runtime for ModernBERT decision gates."""
+    """Inference runtime delegating decision gates directly to LayaProvider."""
 
     def __init__(
         self,
@@ -67,26 +67,28 @@ class LayaRuntime:
         device: Optional[str] = None,
         load_weights: Optional[bool] = None,
         api_url: Optional[str] = None,
+        tau_scorer: float = 0.70,
+        tau_filter: float = 0.75,
+        tau_router: float = 0.80,
+        tau_inj: float = 0.90,
+        tau_rel: float = 0.70,
+        tau_supervisor: float = 0.70,
     ) -> None:
         self.model_name = model_name
-        if device is None:
-            try:
-                import torch
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                device = "cpu"
         self.device = detect_device(device)
-
-        if load_weights is None:
-            load_weights = (self.device == "cuda")
-        self.load_weights = bool(load_weights)
+        self.load_weights = bool(load_weights) if load_weights is not None else (self.device == "cuda")
         self.api_url = (api_url or os.environ.get("LAYA_API_URL", "")).strip().rstrip("/")
+        self.tau_scorer = tau_scorer
+        self.tau_filter = tau_filter
+        self.tau_router = tau_router
+        self.tau_inj = tau_inj
+        self.tau_rel = tau_rel
+        self.tau_supervisor = tau_supervisor
+
+        from laya_agent.agent.providers.laya import LayaProvider
+        self.provider = LayaProvider(device=self.device, load_weights=self.load_weights)
         self._model = None
         self._tokenizer = None
-
-        if self.load_weights and not self.api_url:
-            self._init_live_model()
 
     @property
     def model(self) -> Any:
@@ -122,102 +124,15 @@ class LayaRuntime:
             return None
         return None
 
-    def _init_live_model(self) -> None:
-        """Lazily initialize ModernBERT model weights directly to self.device."""
-        try:
-            import torch
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer  # type: ignore
-
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_name,
-                num_labels=2,
-            ).to(self.device)
-            self._model.eval()
-        except Exception as exc:
-            self._model = None
-            self._tokenizer = None
-            if self.device == "cuda":
-                raise RuntimeError(
-                    f"Failed to load {self.model_name} on {self.device}: {exc}"
-                ) from exc
-
-    def _forward_pass(self, text: str) -> Tuple[int, float]:
-        """Execute real PyTorch forward pass on CUDA/GPU with tokenization."""
-        if self._model is None or self._tokenizer is None:
-            return 0, 0.0
-        import torch
-
-        inputs = self._tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=False,
-        ).to(self.device)
-        with torch.no_grad():
-            outputs = self._model(**inputs)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)
-            pred_class = int(torch.argmax(probs, dim=-1).item())
-            confidence = float(probs[0, pred_class].item())
-        return pred_class, confidence
-
     # ------------------------------------------------------------------
     # 1. Scorer Gate ([C])
     # ------------------------------------------------------------------
     def score_task(self, prompt: str) -> Tuple[Decision, float]:
         """Score task prompt: 'small' (low complexity) vs. 'big' (multi-step/risk)."""
-        synchronize_device(self.device)
-        t0 = time.perf_counter()
-
-        pred_class = None
-        if self.load_weights and self.model is not None:
-            pred_class, _ = self._forward_pass(prompt)
-
-        prompt_lower = prompt.lower()
-        big_patterns = [
-            r"transfer",
-            r"wire",
-            r"balance.*and.*transact",
-            r"recurring",
-            r"plan",
-            r"coordinate",
-            r"schedule.*meeting.*external",
-            r"export.*archive",
-            r"invoice",
-            r"budget",
-            r"book.*flight",
-            r"cancel.*reservation",
-            r"admin",
-            r"exfiltrate",
-            r"multi-step",
-            r"follow-up",
-            r"perform.*follow",
-        ]
-        small_patterns = [
-            r"^find\s+file",
-            r"^read\s+",
-            r"^check\s+balance",
-            r"^get\s+status",
-            r"^what\s+is",
-            r"^look\s*up",
-            r"^search\s+",
-            r"^compute\s+\d+\s*\+",
-            r"^simple\s+query",
-        ]
-        is_big = any(re.search(pat, prompt_lower) for pat in big_patterns) or (pred_class == 1)
-        is_small = any(re.search(pat, prompt_lower) for pat in small_patterns)
-        if len(prompt.split()) > 20:
-            is_big = True
-
-        if is_small and not is_big:
-            decision, confidence = Decision.SMALL, 0.92
-        else:
-            decision, confidence = Decision.BIG, 0.95
-
-        synchronize_device(self.device)
-        _ = (time.perf_counter() - t0) * 1000.0
+        res = self.predict(prompt, schema=SCORER_SCHEMA)
+        tier_choice = res.get("model_tier", {}).get("choice", "big")
+        confidence = float(res.get("model_tier", {}).get("confidence", 0.90))
+        decision = Decision.SMALL if tier_choice == "small" else Decision.BIG
         return decision, confidence
 
     # ------------------------------------------------------------------
@@ -230,32 +145,15 @@ class LayaRuntime:
         suite: str = "",
     ) -> Tuple[Decision, float]:
         """Evaluate candidate policy: 'keep' (strictly relevant) vs 'drop' (noise)."""
-        synchronize_device(self.device)
-        t0 = time.perf_counter()
-
         p_text = policy.text if hasattr(policy, "text") else str(policy)
-        p_lower = p_text.lower()
-        prompt_lower = prompt.lower()
-
-        if self.load_weights and self.model is not None:
-            self._forward_pass(f"Policy: {p_text} | Task: {prompt}")
-
-        if "[drop]" in p_lower or "[noise]" in p_lower or "[irrelevant]" in p_lower:
-            decision, confidence = Decision.DROP, 0.95
-        elif "[keep]" in p_lower or "[relevant]" in p_lower:
-            decision, confidence = Decision.KEEP, 0.95
-        else:
-            # Word overlap relevance check
-            words_policy = set(re.findall(r"\w{4,}", p_lower))
-            words_prompt = set(re.findall(r"\w{4,}", prompt_lower))
-            overlap = words_policy & words_prompt - {"must", "should", "never", "only", "from", "with"}
-            if overlap:
-                decision, confidence = Decision.KEEP, 0.90
-            else:
-                decision, confidence = Decision.DROP if suite else Decision.KEEP, 0.85
-
-        synchronize_device(self.device)
-        _ = (time.perf_counter() - t0) * 1000.0
+        res = self.predict(
+            p_text,
+            schema=FILTER_SCHEMA,
+            ctx={"user_prompt": prompt, "suite": suite},
+        )
+        choice = res.get("applies", {}).get("choice", "keep")
+        confidence = float(res.get("applies", {}).get("confidence", 0.90))
+        decision = Decision.DROP if choice == "drop" else Decision.KEEP
         return decision, confidence
 
     # ------------------------------------------------------------------
@@ -267,31 +165,17 @@ class LayaRuntime:
         recent_observation: str = "",
     ) -> Tuple[Decision, float, Optional[str], Dict[str, Any]]:
         """Evaluate pre-LLM execution bypass: 'bypass_llm' vs 'call_llm'."""
-        synchronize_device(self.device)
-        t0 = time.perf_counter()
-
-        if self.load_weights and self.model is not None:
-            input_summary = recent_observation or (messages[0]["content"] if messages else "")
-            self._forward_pass(input_summary)
-
-        obs_lower = recent_observation.lower()
-        if (
-            "[confirmation_required]" in obs_lower
-            or "[routine_follow_up]" in obs_lower
-            or "[bypass_llm]" in obs_lower
-            or "please confirm to proceed" in obs_lower
-        ):
-            tool_match = re.search(r"tool:\s*([a-zA-Z0-9_]+)", recent_observation, re.IGNORECASE)
-            tool_name = tool_match.group(1) if tool_match else "confirm_action"
-            decision, confidence = Decision.BYPASS_LLM, 0.92
-            tool_args: Dict[str, Any] = {}
-        else:
-            decision, confidence = Decision.CALL_LLM, 0.90
-            tool_name = None
-            tool_args = {}
-
-        synchronize_device(self.device)
-        _ = (time.perf_counter() - t0) * 1000.0
+        input_summary = recent_observation or (messages[0]["content"] if messages else "")
+        res = self.predict(
+            input_summary,
+            schema=ROUTER_SCHEMA,
+            ctx={"messages": messages, "recent_observation": recent_observation},
+        )
+        choice = res.get("action", {}).get("choice", "call_llm")
+        confidence = float(res.get("action", {}).get("confidence", 0.90))
+        decision = Decision.BYPASS_LLM if choice == "bypass_llm" else Decision.CALL_LLM
+        tool_name = res.get("action", {}).get("tool_name")
+        tool_args = res.get("action", {}).get("tool_args", {})
         return decision, confidence, tool_name, tool_args
 
     # ------------------------------------------------------------------
@@ -303,27 +187,17 @@ class LayaRuntime:
         user_prompt: str = "",
     ) -> Tuple[bool, float, bool, float]:
         """Check raw chunk: (is_injection, p_inj, is_relevant, p_rel)."""
-        synchronize_device(self.device)
-        t0 = time.perf_counter()
-
-        if self.load_weights and self.model is not None:
-            self._forward_pass(chunk)
-
-        c_lower = chunk.lower()
-        has_injection = bool(
-            REGEX_INJECTION_PATTERN.search(chunk)
-            or "attacker.com" in c_lower
-            or "leak to" in c_lower
-            or "exfiltrate" in c_lower
+        res = self.predict(
+            chunk,
+            schema=FIREWALL_SCHEMA,
+            ctx={"user_prompt": user_prompt},
         )
-        p_inj = 0.99 if has_injection else 0.05
-
-        is_relevant = not ("[noise]" in c_lower or "unrelated boilerplate" in c_lower)
-        p_rel = 0.95 if not is_relevant else 0.90
-
-        synchronize_device(self.device)
-        _ = (time.perf_counter() - t0) * 1000.0
-        return has_injection, p_inj, is_relevant, p_rel
+        p_inj = float(res.get("injection_detected", {}).get("score", 0.0))
+        is_inj = p_inj > self.tau_inj
+        rel_choice = res.get("relevance", {}).get("choice", "keep")
+        p_rel = float(res.get("relevance", {}).get("confidence", 0.90))
+        is_rel = (rel_choice == "keep")
+        return is_inj, p_inj, is_rel, p_rel
 
     # ------------------------------------------------------------------
     # 5. Supervisor Gate ([B])
@@ -334,32 +208,20 @@ class LayaRuntime:
         recent_observation: str = "",
     ) -> Tuple[Decision, float]:
         """Supervise trajectory health: 'continue', 'nudge', or 'stop'."""
-        synchronize_device(self.device)
-        t0 = time.perf_counter()
-
-        if self.load_weights and self.model is not None:
-            self._forward_pass(recent_observation or "step")
-
-        obs_lower = recent_observation.lower()
-        reason = "normal_progress"
-        if "[task_complete]" in obs_lower or "completed successfully" in obs_lower:
-            decision, confidence = Decision.STOP, 0.99
-            reason = "goal_completed"
-        else:
-            recent_tools = [
-                getattr(r, "tool", None) or (r.get("tool") if isinstance(r, dict) else None)
-                for r in trajectory
-                if (getattr(r, "module", None) == "tool" or (isinstance(r, dict) and r.get("module") == "tool"))
-            ]
-            if len(recent_tools) >= 3 and len(set(recent_tools[-3:])) == 1 and recent_tools[-1] is not None:
-                decision, confidence = Decision.NUDGE, 0.95
-                reason = "detected_repeated_tool_loop"
-            else:
-                decision, confidence = Decision.CONTINUE, 0.90
-
-        self._last_supervisor_reason = reason
-        synchronize_device(self.device)
-        _ = (time.perf_counter() - t0) * 1000.0
+        res = self.predict(
+            {"recent_observation": recent_observation, "trajectory": trajectory},
+            schema=SUPERVISOR_SCHEMA,
+            ctx={"trajectory": trajectory, "recent_observation": recent_observation},
+        )
+        status = res.get("status", {}).get("choice", "continue")
+        confidence = float(res.get("status", {}).get("confidence", 0.90))
+        mapping = {
+            "continue": Decision.CONTINUE,
+            "nudge": Decision.NUDGE,
+            "stop": Decision.STOP,
+        }
+        decision = mapping.get(status, Decision.CONTINUE)
+        self._last_supervisor_reason = res.get("reason", "normal_progress")
         return decision, confidence
 
     supervise_loop = supervise_step
@@ -369,11 +231,11 @@ class LayaRuntime:
     # ------------------------------------------------------------------
     def predict(
         self,
-        text: str,
+        text: Any,
         schema: Optional[Dict[str, Any]] = None,
         ctx: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Generic prediction hook compatible with all gate schema evaluators."""
+        """Generic prediction hook delegating to remote or LayaProvider."""
         ctx = ctx or {}
 
         # Remote Colab / tunnel dispatch if api_url is configured
@@ -385,75 +247,7 @@ class LayaRuntime:
             if remote_resp and isinstance(remote_resp, dict):
                 return remote_resp
 
-        # 1. Scorer Gate Schema
-        if schema == SCORER_SCHEMA or "model_tier" in (schema or {}):
-            dec, conf = self.score_task(text)
-            return {
-                "model_tier": {
-                    "choice": dec.value,
-                    "confidence": conf,
-                }
-            }
-
-        # 2. Applicability Filter Schema
-        if schema == FILTER_SCHEMA or "applies" in (schema or {}):
-            prompt = str(ctx.get("user_prompt", ""))
-            suite = str(ctx.get("suite", ""))
-            dec, conf = self.filter_policy(text, prompt=prompt, suite=suite)
-            return {
-                "applies": {
-                    "choice": dec.value,
-                    "confidence": conf,
-                }
-            }
-
-        # 3. Action Router Schema
-        if schema == ROUTER_SCHEMA or "action" in (schema or {}):
-            messages = ctx.get("messages", [])
-            dec, conf, t_name, t_args = self.route_action(messages, recent_observation=text)
-            return {
-                "action": {
-                    "choice": dec.value,
-                    "confidence": conf,
-                    "tool_name": t_name,
-                    "tool_args": t_args,
-                }
-            }
-
-        # 4. Context Firewall Schema
-        if schema == FIREWALL_SCHEMA or "injection_detected" in (schema or {}):
-            user_prompt = str(ctx.get("user_prompt", ""))
-            is_inj, p_inj, is_rel, p_rel = self.check_chunk(text, user_prompt=user_prompt)
-            return {
-                "injection_detected": {
-                    "score": p_inj,
-                },
-                "relevance": {
-                    "choice": "keep" if is_rel else "drop",
-                    "confidence": p_rel,
-                },
-            }
-
-        # 5. Supervisor Schema
-        if schema == SUPERVISOR_SCHEMA or "status" in (schema or {}):
-            traj = ctx.get("trajectory", []) if isinstance(ctx, dict) else []
-            obs = ""
-            if isinstance(text, str):
-                obs = text
-            elif isinstance(text, dict):
-                obs = text.get("recent_observation", "") or text.get("last_observation", "")
-                if not traj:
-                    traj = text.get("trajectory", [])
-            dec, conf = self.supervise_step(traj, recent_observation=obs)
-            return {
-                "status": {
-                    "choice": dec.value,
-                    "confidence": conf,
-                },
-                "reason": getattr(self, "_last_supervisor_reason", "normal_progress"),
-            }
-
-        return {}
+        return self.provider.predict(text=text, schema=schema, ctx=ctx)
 
 
 __all__ = ["LayaRuntime", "detect_device", "synchronize_device"]

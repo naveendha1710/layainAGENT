@@ -12,8 +12,8 @@ seed: 42
 
 # Hosted LLM tier models (parameterized via NVIDIA_API_KEY / env overrides;
 # SMALL_TIER_MODEL is selected during Milestone 5 Dev-split calibration).
-BIG_TIER_MODEL: "nvidia/nemotron-3.5-bolt-e4b"
-SMALL_TIER_MODEL: "nvidia/nemotron-3.5-bolt-e4b"
+BIG_TIER_MODEL: "meta/llama-3.1-70b-instruct"
+SMALL_TIER_MODEL: "meta/llama-3.1-8b-instruct"
 NVIDIA_BUILD_BASE_URL: "https://integrate.api.nvidia.com/v1"
 NVIDIA_API_KEY: "${NVIDIA_API_KEY}"
 LAYA_API_URL: "${LAYA_API_URL}"                # Colab ngrok / remote endpoint URL
