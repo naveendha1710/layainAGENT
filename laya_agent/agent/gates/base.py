@@ -48,6 +48,7 @@ class Decision(str, Enum):
     # Firewall injection redaction
     REDACT = "redact"
     PASS = "pass"
+    INJECTION_DETECTED = "injection_detected"
 
 
 @dataclass

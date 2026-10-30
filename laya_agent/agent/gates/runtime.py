@@ -68,11 +68,11 @@ class LayaRuntime:
         load_weights: Optional[bool] = None,
         api_url: Optional[str] = None,
         tau_scorer: float = 0.70,
-        tau_filter: float = 0.75,
-        tau_router: float = 0.80,
-        tau_inj: float = 0.90,
+        tau_filter: float = 0.70,
+        tau_router: float = 0.70,
+        tau_inj: float = 0.75,
         tau_rel: float = 0.70,
-        tau_supervisor: float = 0.70,
+        tau_supervisor: float = 0.50,
     ) -> None:
         self.model_name = model_name
         self.device = detect_device(device)

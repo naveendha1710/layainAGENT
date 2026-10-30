@@ -189,23 +189,24 @@ class MockProvider(BaseProvider):
                 rel_choice = "drop"
                 rel_conf = 0.95
 
-            inj_dec = "yes" if inj_score > 0.5 else "no"
-            inj_conf = inj_score if inj_score > 0.5 else 1.0 - inj_score
+            inj_dec = "yes" if inj_score >= 0.5 else "no"
+            inj_conf = inj_score
             res = {
                 "injection_detected": {
                     "decision": inj_dec,
                     "confidence": inj_conf,
+                    "p_injection": inj_score,
                     "score": inj_score,
                     "choice": inj_dec,
                     "probabilities": {"yes": inj_score, "no": 1.0 - inj_score},
-                    "raw": {"score": inj_score, "choice": inj_dec},
+                    "raw": {"type": "noul", "noul": inj_score, "answer_confidence": inj_score, "score": inj_score, "choice": inj_dec},
                 },
                 "relevance": {
                     "decision": rel_choice,
                     "confidence": rel_conf,
                     "choice": rel_choice,
                     "probabilities": {rel_choice: rel_conf, ("drop" if rel_choice == "keep" else "keep"): 1.0 - rel_conf},
-                    "raw": {"choice": rel_choice, "confidence": rel_conf},
+                    "raw": {"type": "choice", "choice": rel_choice, "confidence": rel_conf, "answer_confidence": rel_conf},
                 },
             }
 

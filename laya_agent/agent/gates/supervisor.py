@@ -33,7 +33,7 @@ class SupervisorGate(Gate):
 
     def __init__(
         self,
-        tau: float = 0.70,
+        tau: float = 0.50,
         mode: str = "laya",  # "laya" | "off"
         engine: Optional[Any] = None,
         device: str = "cuda",

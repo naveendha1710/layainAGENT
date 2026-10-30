@@ -178,26 +178,33 @@ class LayaProvider(BaseProvider):
         answers_dict = raw_result.get("answers", {}) if isinstance(raw_result, dict) else {}
         for field, q_ans in answers_dict.items():
             if isinstance(q_ans, dict):
-                choice = q_ans.get("choice") or q_ans.get("answer")
-                confidence = float(q_ans.get("answer_confidence", q_ans.get("confidence", 1.0)))
-                probabilities = q_ans.get("probabilities", {})
-                parsed_answers[field] = {
-                    "decision": choice,
-                    "confidence": confidence,
-                    "probabilities": probabilities,
-                    "choice": choice,
-                    "raw": q_ans,
-                }
+                if q_ans.get("type") == "noul":
+                    p_inj = float(q_ans.get("noul", q_ans.get("answer_confidence", 0.0)))
+                    decision = "yes" if p_inj >= 0.5 else "no"
+                    confidence = p_inj
+                    parsed_answers[field] = {
+                        "decision": decision,
+                        "choice": decision,
+                        "confidence": confidence,
+                        "p_injection": p_inj,
+                        "score": p_inj,
+                        "raw": q_ans,
+                    }
+                else:
+                    decision = q_ans.get("choice") or q_ans.get("answer")
+                    confidence = float(q_ans.get("answer_confidence", q_ans.get("confidence", 1.0)))
+                    probabilities = q_ans.get("probabilities", {})
+                    parsed_answers[field] = {
+                        "decision": decision,
+                        "choice": decision,
+                        "confidence": confidence,
+                        "probabilities": probabilities,
+                        "raw": q_ans,
+                    }
                 if "tool_name" in q_ans:
                     parsed_answers[field]["tool_name"] = q_ans["tool_name"]
                 if "tool_args" in q_ans:
                     parsed_answers[field]["tool_args"] = q_ans["tool_args"]
-                if "score" in q_ans:
-                    parsed_answers[field]["score"] = q_ans["score"]
-                elif "yes" in probabilities:
-                    parsed_answers[field]["score"] = float(probabilities["yes"])
-                elif choice in ("yes", "true", "redact"):
-                    parsed_answers[field]["score"] = confidence
 
         # Direct fields fallback (e.g. custom mock router in tests)
         if not parsed_answers and isinstance(raw_result, dict):
@@ -205,24 +212,33 @@ class LayaProvider(BaseProvider):
                 if field.startswith("_") or field in ("model", "usage", "routing", "latency_ms"):
                     continue
                 if isinstance(val, dict):
-                    choice = val.get("choice") or val.get("answer") or val.get("decision")
-                    confidence = float(val.get("confidence", val.get("answer_confidence", 1.0)))
-                    probabilities = val.get("probabilities", {})
-                    parsed_answers[field] = {
-                        "decision": choice,
-                        "confidence": confidence,
-                        "probabilities": probabilities,
-                        "choice": choice,
-                        "raw": val,
-                    }
+                    if val.get("type") == "noul" or "noul" in val or "p_injection" in val:
+                        p_inj = float(val.get("noul", val.get("p_injection", val.get("answer_confidence", val.get("score", 0.0)))))
+                        decision = "yes" if p_inj >= 0.5 else "no"
+                        confidence = p_inj
+                        parsed_answers[field] = {
+                            "decision": decision,
+                            "choice": decision,
+                            "confidence": confidence,
+                            "p_injection": p_inj,
+                            "score": p_inj,
+                            "raw": val,
+                        }
+                    else:
+                        decision = val.get("choice") or val.get("answer") or val.get("decision")
+                        confidence = float(val.get("answer_confidence", val.get("confidence", 1.0)))
+                        probabilities = val.get("probabilities", {})
+                        parsed_answers[field] = {
+                            "decision": decision,
+                            "choice": decision,
+                            "confidence": confidence,
+                            "probabilities": probabilities,
+                            "raw": val,
+                        }
                     if "tool_name" in val:
                         parsed_answers[field]["tool_name"] = val["tool_name"]
                     if "tool_args" in val:
                         parsed_answers[field]["tool_args"] = val["tool_args"]
-                    if "score" in val:
-                        parsed_answers[field]["score"] = val["score"]
-                    elif "yes" in probabilities:
-                        parsed_answers[field]["score"] = float(probabilities["yes"])
 
         return {
             **parsed_answers,

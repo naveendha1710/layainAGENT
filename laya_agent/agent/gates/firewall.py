@@ -55,7 +55,7 @@ class ContextFirewall(Gate):
 
     def __init__(
         self,
-        tau_inj: float = 0.90,
+        tau_inj: float = 0.75,
         tau_rel: float = 0.70,
         mode: str = "laya",  # "laya" | "regex" | "off"
         chunk_size: int = 300,
@@ -132,32 +132,58 @@ class ContextFirewall(Gate):
         if self.engine is not None:
             # Expected engine contract: engine.predict(text, schema=...)
             if hasattr(self.engine, "predict"):
-                return self.engine.predict(chunk, schema=FIREWALL_SCHEMA, ctx={"user_prompt": user_prompt})
-            if callable(self.engine):
-                return self.engine(chunk, user_prompt=user_prompt)
-
-        # Built-in offline deterministic scorer
-        # 1. Injection check
-        inj_score = 0.0
-        if REGEX_INJECTION_PATTERN.search(chunk) or "attacker.com" in chunk or "injection" in chunk.lower():
-            inj_score = 0.99
+                scores = self.engine.predict(chunk, schema=FIREWALL_SCHEMA, ctx={"user_prompt": user_prompt})
+            elif callable(self.engine):
+                scores = self.engine(chunk, user_prompt=user_prompt)
+            else:
+                scores = {}
         else:
-            inj_score = 0.05
+            # Built-in offline deterministic scorer
+            inj_score = 0.0
+            if REGEX_INJECTION_PATTERN.search(chunk) or "attacker.com" in chunk or "injection" in chunk.lower():
+                inj_score = 0.99
+            else:
+                inj_score = 0.05
 
-        # 2. Relevance check
-        rel_decision = "keep"
-        rel_confidence = 0.90
-        if "[noise]" in chunk.lower() or "unrelated boilerplate" in chunk.lower():
-            rel_decision = "drop"
-            rel_confidence = 0.95
+            rel_decision = "keep"
+            rel_confidence = 0.90
+            if "[noise]" in chunk.lower() or "unrelated boilerplate" in chunk.lower():
+                rel_decision = "drop"
+                rel_confidence = 0.95
+
+            scores = {
+                "injection_detected": {
+                    "p_injection": inj_score,
+                    "confidence": inj_score,
+                    "score": inj_score,
+                },
+                "relevance": {
+                    "choice": rel_decision,
+                    "decision": rel_decision,
+                    "confidence": rel_confidence,
+                },
+            }
+
+        # Extract injection probability
+        inj_node = scores.get("injection_detected", {})
+        p_inj = float(inj_node.get("p_injection", inj_node.get("confidence", inj_node.get("score", 0.0))))
+        is_inj = (p_inj >= self.tau_inj)
+
+        rel_data = scores.get("relevance", {})
+        rel_choice = rel_data.get("choice", rel_data.get("decision", "keep"))
+        rel_conf = float(rel_data.get("confidence", 0.90))
 
         return {
             "injection_detected": {
-                "score": inj_score,
+                "decision": Decision.INJECTION_DETECTED.value if is_inj else "no",
+                "p_injection": p_inj,
+                "confidence": p_inj,
+                "score": p_inj,
             },
             "relevance": {
-                "choice": rel_decision,
-                "confidence": rel_confidence,
+                "choice": rel_choice,
+                "decision": rel_choice,
+                "confidence": rel_conf,
             },
         }
 
@@ -203,11 +229,16 @@ class ContextFirewall(Gate):
             scores = self._score_chunk(chunk, user_prompt)
 
             # 1. Prompt Injection evaluation (noul)
-            inj_data = scores.get("injection_detected", {})
-            inj_score = float(inj_data.get("score", 0.0))
-            max_inj_score = max(max_inj_score, inj_score)
+            p_inj = float(scores.get("injection_detected", {}).get(
+                "p_injection",
+                scores.get("injection_detected", {}).get(
+                    "confidence",
+                    scores.get("injection_detected", {}).get("score", 0.0),
+                ),
+            ))
+            max_inj_score = max(max_inj_score, p_inj)
 
-            if inj_score > self.tau_inj:
+            if p_inj >= self.tau_inj:
                 any_injection = True
                 redacted_count += 1
                 sanitized_chunks.append(REDACTION_MESSAGE)
@@ -215,7 +246,7 @@ class ContextFirewall(Gate):
 
             # 2. Relevance / Noise filtering evaluation (choice)
             rel_data = scores.get("relevance", {})
-            rel_choice = rel_data.get("choice", "keep")
+            rel_choice = rel_data.get("choice", rel_data.get("decision", "keep"))
             rel_conf = float(rel_data.get("confidence", 0.0))
 
             if rel_choice == "drop" and rel_conf >= self.tau_rel:
@@ -238,9 +269,11 @@ class ContextFirewall(Gate):
                 raw_output={
                     "sanitized_output": sanitized_output,
                     "injection_detected": True,
-                    "chunks_total": len(chunks),
+                    "decision": Decision.INJECTION_DETECTED.value,
                     "redacted_chunks": redacted_count,
                     "dropped_chunks": dropped_count,
+                    "total_chunks": len(chunks),
+                    "chunks_total": len(chunks),
                 },
             )
 

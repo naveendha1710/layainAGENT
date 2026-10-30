@@ -39,9 +39,9 @@ thresholds:
   tau_scorer: 0.70
   tau_filter: 0.70
   tau_router: 0.70
-  tau_inj: 0.90
+  tau_inj: 0.75
   tau_rel: 0.70
-  tau_supervisor: 0.70
+  tau_supervisor: 0.50
 
 # Gate modes: off | laya | regex | always_small | always_big | random
 #   off      - gate disabled (pass-through)
