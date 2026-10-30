@@ -41,6 +41,7 @@ def test_run_dev_campaign_execution_and_artifacts() -> None:
             seed=42,
             max_steps=5,
             force_rerun=True,
+            allow_mock_llm=True,
         )
 
         assert res is not None
@@ -86,6 +87,7 @@ def test_run_dev_campaign_execution_and_artifacts() -> None:
             seed=42,
             max_steps=5,
             force_rerun=False,
+            allow_mock_llm=True,
         )
         assert res_resume["campaign_result"]["executed"] == 0
         assert res_resume["campaign_result"]["skipped"] == 2 * 75

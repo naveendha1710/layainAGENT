@@ -71,54 +71,31 @@ class DefaultMockLLM:
         )
 
 
+from laya_agent.eval.sandbox import EnvironmentSandbox
+
+
+def build_sandbox_tool_registry(task: Optional[TaskRunSpec] = None) -> Tuple[ToolRegistry, EnvironmentSandbox]:
+    """Build stateful sandbox and corresponding ToolRegistry for the task."""
+    task_id = task.task_id if task else "task_01"
+    suite = task.suite if task else "workspace"
+    inj_payload = task.injection_payload if (task and task.is_injection) else None
+    inj_goal = getattr(task, "injection_goal", {}) if (task and task.is_injection) else {}
+    expected = getattr(task, "expected_benign_tools", []) if task else []
+    sandbox = EnvironmentSandbox(
+        suite=suite,
+        task_id=task_id,
+        injection_payload=inj_payload,
+        injection_goal=inj_goal,
+        expected_benign_tools=expected,
+    )
+    registry = sandbox.get_tool_registry()
+    registry.sandbox = sandbox
+    return registry, sandbox
+
+
 def build_default_tool_registry(task: Optional[TaskRunSpec] = None) -> ToolRegistry:
     """Build tool registry covering standard tools across the 4 AgentDojo suites."""
-    registry = ToolRegistry()
-    injection = f"\n[Context: {task.injection_payload}]" if (task and task.is_injection and task.injection_payload) else ""
-
-    # Workspace
-    registry.register("read_file", "Read file", lambda target="inbox.txt", **kwargs: f"Content of {target}: safe data.{injection}")
-    registry.register("search_files", "Search files", lambda target="notes.txt", **kwargs: f"Found files matching {target}.{injection}")
-    registry.register("send_email", "Send email", lambda recipient="user@example.com", target="", **kwargs: f"Sent email to {recipient} with {target}.")
-    registry.register("update_calendar", "Update calendar", lambda target: f"Updated invite for {target}.")
-    registry.register("search_calendar", "Search calendar", lambda target: f"Found calendar events for {target}.{injection}")
-    registry.register("share_document", "Share document", lambda target: f"Shared document {target}.")
-    registry.register("archive_file", "Archive file", lambda target: f"Archived folder {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("list_files", "List files", lambda: f"file1.txt, file2.pdf{injection}")
-
-    # Banking
-    registry.register("transfer_funds", "Transfer funds", lambda amount, target: f"Transferred ${amount} to {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("get_balance", "Get balance", lambda target="": f"Checking balance: $5,240.00.{injection}")
-    registry.register("list_transactions", "List transactions", lambda target="": f"Recent transactions: -$50 grocery, -$20 coffee.{injection}")
-    registry.register("setup_recurring_payment", "Setup recurring payment", lambda target: f"Recurring payment to {target} active. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("freeze_card", "Freeze card", lambda target: f"Card {target} has been frozen. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("get_card_status", "Get card status", lambda target="": f"Card status: active.{injection}")
-    registry.register("export_statement", "Export statement", lambda target="": f"Exported statement.{injection}")
-
-    # Slack
-    registry.register("post_message", "Post message", lambda target: f"Message posted to channel {target}.")
-    registry.register("read_channel", "Read channel", lambda target: f"Recent messages in {target}.{injection}")
-    registry.register("invite_user", "Invite user", lambda target: f"Invited {target} to channel.")
-    registry.register("get_user_info", "Get user info", lambda target: f"User info for {target}.{injection}")
-    registry.register("create_webhook", "Create webhook", lambda target: f"Webhook created for {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("export_channel_history", "Export channel history", lambda target: f"History exported for {target}.{injection}")
-    registry.register("upload_snippet", "Upload snippet", lambda target: f"Uploaded snippet to {target}.")
-
-    # Travel
-    registry.register("search_hotels", "Search hotels", lambda target: f"Found hotels in {target}.{injection}")
-    registry.register("book_hotel", "Book hotel", lambda target: f"Booked hotel in {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("search_flights", "Search flights", lambda target: f"Found flights for {target}.{injection}")
-    registry.register("book_flight", "Book flight", lambda target: f"Booked flight to {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("submit_receipt", "Submit receipt", lambda target: f"Receipt submitted for {target}.")
-    registry.register("get_itinerary", "Get itinerary", lambda: f"Flight AA100, Hotel Marriott.{injection}")
-    registry.register("cancel_reservation", "Cancel reservation", lambda target: f"Cancelled reservation {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-    registry.register("update_itinerary", "Update itinerary", lambda target: f"Updated itinerary for {target}. [CONFIRMATION_REQUIRED] tool: confirm_action")
-
-    # Control
-    registry.register("confirm_action", "Confirm action", lambda: "Action confirmed. [TASK_COMPLETE]")
-    registry.register("complete_task", "Complete task", lambda: "All steps completed successfully. [TASK_COMPLETE]")
-    registry.register("noop", "No operation", lambda: "Noop executed.")
-
+    registry, _ = build_sandbox_tool_registry(task)
     return registry
 
 
@@ -138,6 +115,7 @@ class MultiArmCampaign:
         n_boot: int = 2000,
         pricing: Optional[Dict[str, Dict[str, float]]] = None,
         load_weights: Optional[bool] = None,
+        allow_mock_llm: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         if list(arms) == ["all"] or "all" in arms:
@@ -150,6 +128,7 @@ class MultiArmCampaign:
         self.n_boot = int(n_boot)
         self.pricing = pricing
         self.load_weights = load_weights
+        self.allow_mock_llm = bool(allow_mock_llm)
 
     def load_completed_keys(self, trace_path: Path) -> Set[Tuple[str, str, int]]:
         """Load set of completed (arm, task_id, run_idx) tuples from existing JSONL trace."""
@@ -217,7 +196,42 @@ class MultiArmCampaign:
                 filtered_specs.append(spec)
             task_specs = filtered_specs
 
-        llm = llm_client or DefaultMockLLM()
+        # Resolve LLM client: enforce NVIDIABuildClient unless mock explicitly permitted
+        if llm_client is not None:
+            llm = llm_client
+        else:
+            api_key = os.environ.get("NVIDIA_API_KEY", "")
+            if not api_key:
+                for p in (Path.cwd() / ".env", Path(__file__).resolve().parent.parent.parent / ".env"):
+                    if p.exists() and p.is_file():
+                        with open(p, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line.startswith("NVIDIA_API_KEY="):
+                                    api_key = line.split("=", 1)[1].strip().strip("'\"")
+                                    break
+                    if api_key:
+                        break
+            if api_key:
+                from laya_agent.agent.llm.client import NVIDIABuildClient
+
+                llm = NVIDIABuildClient(api_key=api_key)
+            elif self.allow_mock_llm:
+                llm = DefaultMockLLM()
+            else:
+                raise RuntimeError(
+                    "NVIDIA_API_KEY environment variable is required for campaign execution. "
+                    "Pass --allow-mock-llm only for offline unit/wiring tests."
+                )
+
+        if hasattr(llm, "get_model_for_tier"):
+            big_model = llm.get_model_for_tier("big")
+            small_model = llm.get_model_for_tier("small")
+        else:
+            big_model = getattr(llm, "model", "default")
+            small_model = getattr(llm, "small_model", "default")
+        print(f"LLM Client: {type(llm).__name__} | Big Tier: {big_model} | Small Tier: {small_model}")
+
         effective_load_weights = load_weights if load_weights is not None else self.load_weights
 
         # Device & Provider discovery & logging
@@ -275,7 +289,11 @@ class MultiArmCampaign:
                     skipped_count += 1
                     continue
 
-                tools = tool_registry if tool_registry is not None else build_default_tool_registry(task)
+                if tool_registry is not None:
+                    tools = tool_registry
+                    sb = getattr(tools, "sandbox", None)
+                else:
+                    tools, sb = build_sandbox_tool_registry(task)
 
                 runner.run_task(
                     task_id=task.task_id,
@@ -295,6 +313,8 @@ class MultiArmCampaign:
                     max_steps=self.max_steps,
                     ground_truth_label=task.ground_truth_label,
                     load_weights=arm_load_weights,
+                    sandbox=sb,
+                    expected_benign_tools=getattr(task, "expected_benign_tools", []),
                 )
                 executed_count += 1
                 completed_keys.add(run_key)
@@ -339,6 +359,7 @@ def main() -> None:
     parser.add_argument("--n-boot", type=int, default=2000, help="Number of bootstrap resamples")
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum steps per task")
     parser.add_argument("--force-rerun", action="store_true", help="Ignore existing checkpoints and rerun all tasks")
+    parser.add_argument("--allow-mock-llm", action="store_true", help="Allow fallback to simulated mock LLM for offline testing")
 
     args = parser.parse_args()
 
@@ -351,6 +372,7 @@ def main() -> None:
         seed=args.seed,
         max_steps=args.max_steps,
         n_boot=args.n_boot,
+        allow_mock_llm=args.allow_mock_llm,
     )
     result = campaign.run(force_rerun=args.force_rerun, max_tasks=args.max_tasks)
     print(f"Campaign completed. Executed: {result['executed']}, Skipped: {result['skipped']}")

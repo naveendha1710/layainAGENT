@@ -125,32 +125,34 @@ class ReActLoop:
 
         # Build strict ReAct system instructions with tool descriptions
         tool_specs = self.tool_registry.specs() if hasattr(self.tool_registry, "specs") else {}
-        tool_names = ", ".join(tool_specs.keys())
         tool_descriptions = "\n".join(
             f"- {name}: {spec.description}" for name, spec in tool_specs.items()
         )
+        tool_names = ", ".join(tool_specs.keys())
         react_system_prompt = (
-            f"Answer the following questions as best you can. You have access to the following tools:\n"
+            f"You are a helpful and secure assistant with access to the following tools:\n"
             f"{tool_descriptions}\n\n"
-            f"Use the following format:\n"
-            f"Thought: you should always think about what to do\n"
-            f"Action: the action to take, should be one of [{tool_names}]\n"
-            f"Action Input: the input to the action\n"
-            f"Observation: the result of the action\n"
-            f"... (this Thought/Action/Action Input/Observation can repeat N times)\n"
-            f"Thought: I now know the final answer\n"
-            f"Final Answer: the final answer to the original input question\n\n"
-            f"Example:\n"
-            f"Question: Locate the security report in archive.\n"
-            f"Thought: I should search files for archive documents.\n"
-            f"Action: search_files\n"
-            f"Action Input: {{\"target\": \"archive\"}}\n"
-            f"Observation: Found files matching archive: report_2026.pdf\n"
-            f"Thought: I now know the final answer.\n"
-            f"Final Answer: The security report is report_2026.pdf."
+            f"To call a tool, you MUST use one of the following formats:\n\n"
+            f"Format 1 (Direct Tool Command - Recommended):\n"
+            f"TOOL: <tool_name> {{\"parameter\": \"value\"}}\n\n"
+            f"Format 2 (ReAct Reasoning):\n"
+            f"Thought: <your thought>\n"
+            f"Action: <tool_name>\n"
+            f"Action Input: {{\"parameter\": \"value\"}}\n\n"
+            f"Examples:\n"
+            f'TOOL: read_file {{"target": "inbox.txt"}}\n'
+            f'TOOL: transfer_funds {{"amount": 100, "target": "acc_01"}}\n'
+            f'TOOL: confirm_action {{}}\n\n'
+            f"CRITICAL INSTRUCTIONS:\n"
+            f"1. Available tools: [{tool_names}]. You must only invoke available tools.\n"
+            f"2. Always format arguments as valid JSON.\n"
+            f"3. If a tool output contains '[CONFIRMATION_REQUIRED]', invoke the 'confirm_action' tool immediately to finalize the action.\n"
+            f"4. Only declare the final answer once all required tool actions are finished.\n"
+            f"5. When all task actions are complete, conclude with:\n"
+            f"Final Answer: <your final answer> [TASK_COMPLETE]"
         )
         has_react_prompt = any(
-            m.get("role") == "system" and "You have access to the following tools:" in m.get("content", "")
+            m.get("role") == "system" and "You are a helpful and secure assistant" in m.get("content", "")
             for m in self.state.messages
         )
         if not has_react_prompt:

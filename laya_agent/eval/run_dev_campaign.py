@@ -39,6 +39,7 @@ def run_dev_campaign(
     seed: int = 42,
     max_steps: int = 10,
     force_rerun: bool = False,
+    allow_mock_llm: bool = False,
 ) -> Dict[str, Any]:
     """Execute the 300-run dev calibration campaign across Arms A, B, C, and D."""
     out_path = Path(output_dir)
@@ -86,6 +87,7 @@ def run_dev_campaign(
         seed=seed,
         max_steps=max_steps,
         n_boot=n_boot,
+        allow_mock_llm=allow_mock_llm,
     )
 
     t0 = time.perf_counter()
@@ -229,6 +231,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Evaluation and bootstrap seed")
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum steps per task")
     parser.add_argument("--force-rerun", action="store_true", help="Force re-run and ignore checkpoints")
+    parser.add_argument("--allow-mock-llm", action="store_true", help="Allow fallback to simulated mock LLM for offline testing")
 
     args = parser.parse_args()
     run_dev_campaign(
@@ -239,6 +242,7 @@ def main() -> None:
         seed=args.seed,
         max_steps=args.max_steps,
         force_rerun=args.force_rerun,
+        allow_mock_llm=args.allow_mock_llm,
     )
 
 
