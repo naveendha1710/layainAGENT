@@ -127,13 +127,13 @@ class LayaRuntime:
     # ------------------------------------------------------------------
     # 1. Scorer Gate ([C])
     # ------------------------------------------------------------------
-    def score_task(self, prompt: str) -> Tuple[Decision, float]:
+    def score_task(self, prompt: str) -> Tuple[Decision, float, float]:
         """Score task prompt: 'small' (low complexity) vs. 'big' (multi-step/risk)."""
-        res = self.predict(prompt, schema=SCORER_SCHEMA)
-        tier_choice = res.get("model_tier", {}).get("choice", "big")
-        confidence = float(res.get("model_tier", {}).get("confidence", 0.90))
-        decision = Decision.SMALL if tier_choice == "small" else Decision.BIG
-        return decision, confidence
+        res = self.provider.predict(text=prompt, schema=SCORER_SCHEMA)
+        choice = res["model_tier"]["decision"]
+        conf = float(res["model_tier"]["confidence"])
+        lat = float(res.get("_latency_ms", res.get("latency_ms", 0.0)))
+        return Decision(choice), conf, lat
 
     # ------------------------------------------------------------------
     # 2. Applicability Filter Gate ([D])
@@ -141,42 +141,41 @@ class LayaRuntime:
     def filter_policy(
         self,
         policy: Union[str, Any],
-        prompt: str,
+        user_prompt: str = "",
+        prompt: str = "",
         suite: str = "",
-    ) -> Tuple[Decision, float]:
+    ) -> Tuple[Decision, float, float]:
         """Evaluate candidate policy: 'keep' (strictly relevant) vs 'drop' (noise)."""
         p_text = policy.text if hasattr(policy, "text") else str(policy)
-        res = self.predict(
-            p_text,
+        effective_prompt = user_prompt or prompt
+        res = self.provider.predict(
+            text=f"Policy: {p_text}\nTask: {effective_prompt}",
             schema=FILTER_SCHEMA,
-            ctx={"user_prompt": prompt, "suite": suite},
+            ctx={"user_prompt": effective_prompt, "suite": suite},
         )
-        choice = res.get("applies", {}).get("choice", "keep")
-        confidence = float(res.get("applies", {}).get("confidence", 0.90))
-        decision = Decision.DROP if choice == "drop" else Decision.KEEP
-        return decision, confidence
+        choice = res["applies"]["decision"]
+        conf = float(res["applies"]["confidence"])
+        lat = float(res.get("_latency_ms", res.get("latency_ms", 0.0)))
+        return Decision(choice), conf, lat
 
     # ------------------------------------------------------------------
     # 3. Action Router Gate ([D])
     # ------------------------------------------------------------------
     def route_action(
         self,
-        messages: List[Dict[str, str]],
+        state_summary: Union[str, List[Dict[str, str]]],
         recent_observation: str = "",
-    ) -> Tuple[Decision, float, Optional[str], Dict[str, Any]]:
+    ) -> Tuple[Decision, float, float]:
         """Evaluate pre-LLM execution bypass: 'bypass_llm' vs 'call_llm'."""
-        input_summary = recent_observation or (messages[0]["content"] if messages else "")
-        res = self.predict(
-            input_summary,
-            schema=ROUTER_SCHEMA,
-            ctx={"messages": messages, "recent_observation": recent_observation},
-        )
-        choice = res.get("action", {}).get("choice", "call_llm")
-        confidence = float(res.get("action", {}).get("confidence", 0.90))
-        decision = Decision.BYPASS_LLM if choice == "bypass_llm" else Decision.CALL_LLM
-        tool_name = res.get("action", {}).get("tool_name")
-        tool_args = res.get("action", {}).get("tool_args", {})
-        return decision, confidence, tool_name, tool_args
+        if isinstance(state_summary, list):
+            summary = recent_observation or (state_summary[0]["content"] if state_summary else "")
+        else:
+            summary = str(state_summary)
+        res = self.provider.predict(text=summary, schema=ROUTER_SCHEMA)
+        choice = res["action"]["decision"]
+        conf = float(res["action"]["confidence"])
+        lat = float(res.get("_latency_ms", res.get("latency_ms", 0.0)))
+        return Decision(choice), conf, lat
 
     # ------------------------------------------------------------------
     # 4. Context Firewall Gate ([B])
@@ -185,44 +184,55 @@ class LayaRuntime:
         self,
         chunk: str,
         user_prompt: str = "",
-    ) -> Tuple[bool, float, bool, float]:
-        """Check raw chunk: (is_injection, p_inj, is_relevant, p_rel)."""
-        res = self.predict(
-            chunk,
+    ) -> Dict[str, Any]:
+        """Check raw chunk: (injection_detected, injection_confidence, relevance, relevance_confidence, latency_ms)."""
+        res = self.provider.predict(
+            text=chunk,
             schema=FIREWALL_SCHEMA,
             ctx={"user_prompt": user_prompt},
         )
-        p_inj = float(res.get("injection_detected", {}).get("score", 0.0))
-        is_inj = p_inj > self.tau_inj
-        rel_choice = res.get("relevance", {}).get("choice", "keep")
-        p_rel = float(res.get("relevance", {}).get("confidence", 0.90))
-        is_rel = (rel_choice == "keep")
-        return is_inj, p_inj, is_rel, p_rel
+        inj_node = res.get("injection_detected", {})
+        rel_node = res.get("relevance", {})
+        inj_dec = inj_node.get("decision")
+        if inj_dec is None:
+            inj_dec = "yes" if inj_node.get("score", 0.0) > self.tau_inj else "no"
+        inj_conf = float(inj_node.get("confidence", inj_node.get("score", 0.0)))
+        rel_dec = rel_node.get("decision", rel_node.get("choice", "keep"))
+        rel_conf = float(rel_node.get("confidence", 0.90))
+        lat = float(res.get("_latency_ms", res.get("latency_ms", 0.0)))
+        return {
+            "injection_detected": inj_dec,
+            "injection_confidence": inj_conf,
+            "relevance": rel_dec,
+            "relevance_confidence": rel_conf,
+            "latency_ms": lat,
+        }
 
     # ------------------------------------------------------------------
     # 5. Supervisor Gate ([B])
     # ------------------------------------------------------------------
     def supervise_step(
         self,
-        trajectory: List[Any],
+        trajectory: Union[str, List[Any]],
         recent_observation: str = "",
-    ) -> Tuple[Decision, float]:
+    ) -> Tuple[Decision, float, float]:
         """Supervise trajectory health: 'continue', 'nudge', or 'stop'."""
-        res = self.predict(
-            {"recent_observation": recent_observation, "trajectory": trajectory},
+        if isinstance(trajectory, str):
+            traj_text = trajectory
+            traj_list = []
+        else:
+            traj_list = trajectory
+            traj_text = recent_observation or (str(trajectory) if trajectory else "step")
+        res = self.provider.predict(
+            text=traj_text,
             schema=SUPERVISOR_SCHEMA,
-            ctx={"trajectory": trajectory, "recent_observation": recent_observation},
+            ctx={"trajectory": traj_list, "recent_observation": recent_observation},
         )
-        status = res.get("status", {}).get("choice", "continue")
-        confidence = float(res.get("status", {}).get("confidence", 0.90))
-        mapping = {
-            "continue": Decision.CONTINUE,
-            "nudge": Decision.NUDGE,
-            "stop": Decision.STOP,
-        }
-        decision = mapping.get(status, Decision.CONTINUE)
+        choice = res["status"]["decision"]
+        conf = float(res["status"]["confidence"])
+        lat = float(res.get("_latency_ms", res.get("latency_ms", 0.0)))
         self._last_supervisor_reason = res.get("reason", "normal_progress")
-        return decision, confidence
+        return Decision(choice), conf, lat
 
     supervise_loop = supervise_step
 

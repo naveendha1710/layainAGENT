@@ -75,9 +75,18 @@ def test_laya_provider_with_injected_router() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def predict(self, text, schema=None, ctx=None):
+        def predict(self, state="", questions=None, **kwargs):
             self.calls += 1
-            return {"status": {"choice": "continue", "confidence": 0.98}}
+            return {
+                "answers": {
+                    "status": {
+                        "type": "choice",
+                        "choice": "continue",
+                        "answer_confidence": 0.98,
+                        "probabilities": {"continue": 0.98, "stop": 0.02},
+                    }
+                }
+            }
 
     mock_router = MockRouter()
     provider = LayaProvider(device="cpu", router=mock_router)
@@ -85,6 +94,9 @@ def test_laya_provider_with_injected_router() -> None:
     res = provider.predict("some text", schema=SUPERVISOR_SCHEMA)
     assert mock_router.calls == 1
     assert res["status"]["choice"] == "continue"
+    assert res["status"]["decision"] == "continue"
+    assert res["status"]["confidence"] == 0.98
+    assert res["_latency_ms"] >= 0.0
     assert provider.gate_latency_ms >= 0.0
 
 

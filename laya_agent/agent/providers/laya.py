@@ -107,15 +107,19 @@ class LayaProvider(BaseProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Execute non-autoregressive schema inference with CUDA kernel synchronization."""
-        # Support both predict(schema, text) and predict(text, schema)
+        # Support both predict(schema, text) and predict(text, schema) or kwargs
         if isinstance(text, dict) and isinstance(schema, str):
             schema, text = text, schema
         elif schema is None and isinstance(text, dict) and any(k in text for k in ("model_tier", "applies", "action", "injection_detected", "status")):
             schema = text
-            text = kwargs.get("text", "")
+            text = kwargs.get("text", kwargs.get("state", ""))
         elif schema is None and "schema" in kwargs:
             schema = kwargs["schema"]
-            text = text if text is not None else kwargs.get("text", "")
+        elif schema is None and "questions" in kwargs:
+            schema = kwargs["questions"]
+
+        if text is None and "state" in kwargs:
+            text = kwargs["state"]
 
         ctx = dict(ctx) if ctx is not None else {}
         if isinstance(text, dict):
@@ -133,44 +137,100 @@ class LayaProvider(BaseProvider):
                 self.gate_latency_ms = (time.perf_counter() - t0) * 1000.0
                 if isinstance(res, dict):
                     res["latency_ms"] = self.gate_latency_ms
+                    res["_latency_ms"] = self.gate_latency_ms
                 return res
             raise RuntimeError("laya.Router is not initialized and fallback_to_mock is False.")
 
-        if self.device == "cuda":
-            try:
-                import torch
-                torch.cuda.synchronize()
-            except Exception:
-                pass
+        cuda_avail = False
+        try:
+            import torch
+            cuda_avail = torch.cuda.is_available()
+        except ImportError:
+            pass
+
+        if self.device == "cuda" and cuda_avail:
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
 
         try:
             if hasattr(self.router, "predict"):
                 try:
-                    result = self.router.predict(schema=schema, text=text_str)
+                    raw_result = self.router.predict(state=text_str, questions=schema)
                 except TypeError:
-                    result = self.router.predict(text_str, schema=schema)
+                    raw_result = self.router.predict(text_str, schema)
             elif callable(self.router):
                 try:
-                    result = self.router(schema=schema, text=text_str)
+                    raw_result = self.router(state=text_str, questions=schema)
                 except TypeError:
-                    result = self.router(text_str, schema=schema)
+                    raw_result = self.router(text_str, schema)
             else:
-                result = {}
+                raw_result = {}
         finally:
-            if self.device == "cuda":
+            if self.device == "cuda" and cuda_avail:
                 try:
-                    import torch
                     torch.cuda.synchronize()
                 except Exception:
                     pass
             latency_ms = (time.perf_counter() - t0) * 1000.0
             self.gate_latency_ms = latency_ms
 
-        if isinstance(result, dict):
-            result["latency_ms"] = self.gate_latency_ms
-            return result
-        return {"latency_ms": self.gate_latency_ms}
+        parsed_answers: Dict[str, Any] = {}
+        answers_dict = raw_result.get("answers", {}) if isinstance(raw_result, dict) else {}
+        for field, q_ans in answers_dict.items():
+            if isinstance(q_ans, dict):
+                choice = q_ans.get("choice") or q_ans.get("answer")
+                confidence = float(q_ans.get("answer_confidence", q_ans.get("confidence", 1.0)))
+                probabilities = q_ans.get("probabilities", {})
+                parsed_answers[field] = {
+                    "decision": choice,
+                    "confidence": confidence,
+                    "probabilities": probabilities,
+                    "choice": choice,
+                    "raw": q_ans,
+                }
+                if "tool_name" in q_ans:
+                    parsed_answers[field]["tool_name"] = q_ans["tool_name"]
+                if "tool_args" in q_ans:
+                    parsed_answers[field]["tool_args"] = q_ans["tool_args"]
+                if "score" in q_ans:
+                    parsed_answers[field]["score"] = q_ans["score"]
+                elif "yes" in probabilities:
+                    parsed_answers[field]["score"] = float(probabilities["yes"])
+                elif choice in ("yes", "true", "redact"):
+                    parsed_answers[field]["score"] = confidence
+
+        # Direct fields fallback (e.g. custom mock router in tests)
+        if not parsed_answers and isinstance(raw_result, dict):
+            for field, val in raw_result.items():
+                if field.startswith("_") or field in ("model", "usage", "routing", "latency_ms"):
+                    continue
+                if isinstance(val, dict):
+                    choice = val.get("choice") or val.get("answer") or val.get("decision")
+                    confidence = float(val.get("confidence", val.get("answer_confidence", 1.0)))
+                    probabilities = val.get("probabilities", {})
+                    parsed_answers[field] = {
+                        "decision": choice,
+                        "confidence": confidence,
+                        "probabilities": probabilities,
+                        "choice": choice,
+                        "raw": val,
+                    }
+                    if "tool_name" in val:
+                        parsed_answers[field]["tool_name"] = val["tool_name"]
+                    if "tool_args" in val:
+                        parsed_answers[field]["tool_args"] = val["tool_args"]
+                    if "score" in val:
+                        parsed_answers[field]["score"] = val["score"]
+                    elif "yes" in probabilities:
+                        parsed_answers[field]["score"] = float(probabilities["yes"])
+
+        return {
+            **parsed_answers,
+            "_latency_ms": latency_ms,
+            "latency_ms": latency_ms,
+            "_usage": raw_result.get("usage", {}) if isinstance(raw_result, dict) else {},
+            "_raw": raw_result,
+        }
 
 
 __all__ = [

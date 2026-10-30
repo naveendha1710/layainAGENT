@@ -95,7 +95,16 @@ class MockProvider(BaseProvider):
 
             tier = "small" if (is_small and not is_big) else "big"
             conf = 0.92 if tier == "small" else 0.95
-            res = {"model_tier": {"choice": tier, "confidence": conf}}
+            probs = {"small": conf, "big": 1.0 - conf} if tier == "small" else {"small": 1.0 - conf, "big": conf}
+            res = {
+                "model_tier": {
+                    "decision": tier,
+                    "confidence": conf,
+                    "choice": tier,
+                    "probabilities": probs,
+                    "raw": {"choice": tier, "confidence": conf, "probabilities": probs},
+                }
+            }
 
         # 2. Applicability Filter Schema
         elif schema == FILTER_SCHEMA or "applies" in (schema or {}):
@@ -104,17 +113,32 @@ class MockProvider(BaseProvider):
             suite = str(ctx.get("suite", "")).lower()
 
             if "[drop]" in p_lower or "[noise]" in p_lower or "[irrelevant]" in p_lower:
-                res = {"applies": {"choice": "drop", "confidence": 0.95}}
+                choice = "drop"
+                conf = 0.95
             elif "[keep]" in p_lower or "[relevant]" in p_lower:
-                res = {"applies": {"choice": "keep", "confidence": 0.95}}
+                choice = "keep"
+                conf = 0.95
             else:
                 words_policy = set(re.findall(r"\w{4,}", p_lower))
                 words_prompt = set(re.findall(r"\w{4,}", prompt_lower))
                 overlap = words_policy & words_prompt - {"must", "should", "never", "only", "from", "with"}
                 if overlap:
-                    res = {"applies": {"choice": "keep", "confidence": 0.90}}
+                    choice = "keep"
+                    conf = 0.90
                 else:
-                    res = {"applies": {"choice": "drop" if suite else "keep", "confidence": 0.85}}
+                    choice = "drop" if suite else "keep"
+                    conf = 0.85
+
+            probs = {choice: conf, ("drop" if choice == "keep" else "keep"): 1.0 - conf}
+            res = {
+                "applies": {
+                    "decision": choice,
+                    "confidence": conf,
+                    "choice": choice,
+                    "probabilities": probs,
+                    "raw": {"choice": choice, "confidence": conf, "probabilities": probs},
+                }
+            }
 
         # 3. Action Router Schema
         elif schema == ROUTER_SCHEMA or "action" in (schema or {}):
@@ -122,32 +146,34 @@ class MockProvider(BaseProvider):
             if "confirmation_required" in obs_lower or "[confirmation_required]" in obs_lower:
                 match = re.search(r"tool:\s*([a-zA-Z0-9_-]+)", text_str, re.IGNORECASE)
                 t_name = match.group(1) if match else "confirm_action"
-                res = {
-                    "action": {
-                        "choice": "bypass_llm",
-                        "confidence": 0.95,
-                        "tool_name": t_name,
-                        "tool_args": {},
-                    }
-                }
+                choice = "bypass_llm"
+                conf = 0.95
+                probs = {"bypass_llm": 0.95, "call_llm": 0.05}
+                tool_args = {}
             elif "routine follow-up" in obs_lower or "[routine_follow_up]" in obs_lower:
-                res = {
-                    "action": {
-                        "choice": "bypass_llm",
-                        "confidence": 0.90,
-                        "tool_name": "noop",
-                        "tool_args": {},
-                    }
-                }
+                choice = "bypass_llm"
+                conf = 0.90
+                probs = {"bypass_llm": 0.90, "call_llm": 0.10}
+                t_name = "noop"
+                tool_args = {}
             else:
-                res = {
-                    "action": {
-                        "choice": "call_llm",
-                        "confidence": 0.90,
-                        "tool_name": None,
-                        "tool_args": {},
-                    }
+                choice = "call_llm"
+                conf = 0.90
+                probs = {"bypass_llm": 0.10, "call_llm": 0.90}
+                t_name = None
+                tool_args = {}
+
+            res = {
+                "action": {
+                    "decision": choice,
+                    "confidence": conf,
+                    "choice": choice,
+                    "probabilities": probs,
+                    "tool_name": t_name,
+                    "tool_args": tool_args,
+                    "raw": {"choice": choice, "confidence": conf, "tool_name": t_name, "tool_args": tool_args},
                 }
+            }
 
         # 4. Context Firewall Schema
         elif schema == FIREWALL_SCHEMA or "injection_detected" in (schema or {}):
@@ -163,9 +189,24 @@ class MockProvider(BaseProvider):
                 rel_choice = "drop"
                 rel_conf = 0.95
 
+            inj_dec = "yes" if inj_score > 0.5 else "no"
+            inj_conf = inj_score if inj_score > 0.5 else 1.0 - inj_score
             res = {
-                "injection_detected": {"score": inj_score},
-                "relevance": {"choice": rel_choice, "confidence": rel_conf},
+                "injection_detected": {
+                    "decision": inj_dec,
+                    "confidence": inj_conf,
+                    "score": inj_score,
+                    "choice": inj_dec,
+                    "probabilities": {"yes": inj_score, "no": 1.0 - inj_score},
+                    "raw": {"score": inj_score, "choice": inj_dec},
+                },
+                "relevance": {
+                    "decision": rel_choice,
+                    "confidence": rel_conf,
+                    "choice": rel_choice,
+                    "probabilities": {rel_choice: rel_conf, ("drop" if rel_choice == "keep" else "keep"): 1.0 - rel_conf},
+                    "raw": {"choice": rel_choice, "confidence": rel_conf},
+                },
             }
 
         # 5. Supervisor Schema
@@ -178,7 +219,13 @@ class MockProvider(BaseProvider):
                 if last_3[0] and len(set(last_3)) == 1:
                     self._last_supervisor_reason = "detected_repeated_tool_loop"
                     res = {
-                        "status": {"choice": "nudge", "confidence": 0.95},
+                        "status": {
+                            "decision": "nudge",
+                            "confidence": 0.95,
+                            "choice": "nudge",
+                            "probabilities": {"nudge": 0.95, "continue": 0.05},
+                            "raw": {"choice": "nudge", "confidence": 0.95, "reason": self._last_supervisor_reason},
+                        },
                         "reason": self._last_supervisor_reason,
                     }
 
@@ -186,18 +233,33 @@ class MockProvider(BaseProvider):
                 if "[TASK_COMPLETE]" in text_str or "goal fully satisfied" in text_str.lower() or "workflow finished" in text_str.lower():
                     self._last_supervisor_reason = "goal_fully_satisfied"
                     res = {
-                        "status": {"choice": "stop", "confidence": 0.98},
+                        "status": {
+                            "decision": "stop",
+                            "confidence": 0.98,
+                            "choice": "stop",
+                            "probabilities": {"stop": 0.98, "continue": 0.02},
+                            "raw": {"choice": "stop", "confidence": 0.98, "reason": self._last_supervisor_reason},
+                        },
                         "reason": self._last_supervisor_reason,
                     }
                 else:
                     self._last_supervisor_reason = "normal_progress"
                     res = {
-                        "status": {"choice": "continue", "confidence": 0.90},
+                        "status": {
+                            "decision": "continue",
+                            "confidence": 0.90,
+                            "choice": "continue",
+                            "probabilities": {"continue": 0.90, "nudge": 0.05, "stop": 0.05},
+                            "raw": {"choice": "continue", "confidence": 0.90, "reason": self._last_supervisor_reason},
+                        },
                         "reason": self._last_supervisor_reason,
                     }
 
         self.gate_latency_ms = (time.perf_counter() - t0) * 1000.0
         res["latency_ms"] = self.gate_latency_ms
+        res["_latency_ms"] = self.gate_latency_ms
+        res["_usage"] = {}
+        res["_raw"] = dict(res)
         return res
 
 
