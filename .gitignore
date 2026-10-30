@@ -27,4 +27,6 @@ Thumbs.db
 
 # Benchmark / Smoke results
 results/
+figures/
 *.jsonl
+*.zip
