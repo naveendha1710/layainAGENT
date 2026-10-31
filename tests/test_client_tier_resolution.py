@@ -79,3 +79,77 @@ def test_max_tokens_passed_to_openai_client() -> None:
     client.chat_complete([{"role": "user", "content": "hi"}], model="big", max_tokens=512)
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
     assert call_kwargs["max_tokens"] == 512
+
+
+def test_client_retries_transient_404_and_succeeds(capsys: pytest.CaptureFixture) -> None:
+    client, mock_openai = _make_client_with_mock()
+    client.initial_backoff_ms = 1
+
+    err_404 = RuntimeError("Gateway 404 Not Found")
+    err_404.status_code = 404
+
+    success_resp = MagicMock()
+    success_resp.choices = [MagicMock(message=MagicMock(content="Recovered"))]
+    success_resp.usage.prompt_tokens = 10
+    success_resp.usage.completion_tokens = 5
+    success_resp.model = "resolved-model"
+
+    mock_openai.chat.completions.create.side_effect = [err_404, success_resp]
+
+    resp = client.chat_complete([{"role": "user", "content": "hi"}], model="big")
+    assert resp.content == "Recovered"
+    assert mock_openai.chat.completions.create.call_count == 2
+    captured = capsys.readouterr()
+    assert "[Warn] NVIDIA NIM transient HTTP 404. Retrying in" in captured.out
+
+
+def test_client_retries_transient_503_and_succeeds() -> None:
+    client, mock_openai = _make_client_with_mock()
+    client.initial_backoff_ms = 1
+
+    err_503 = RuntimeError("Service Unavailable")
+    err_503.status_code = 503
+
+    success_resp = MagicMock()
+    success_resp.choices = [MagicMock(message=MagicMock(content="Service Back"))]
+    success_resp.usage.prompt_tokens = 10
+    success_resp.usage.completion_tokens = 5
+    success_resp.model = "resolved-model"
+
+    mock_openai.chat.completions.create.side_effect = [err_503, success_resp]
+
+    resp = client.chat_complete([{"role": "user", "content": "hi"}], model="small")
+    assert resp.content == "Service Back"
+    assert mock_openai.chat.completions.create.call_count == 2
+
+
+def test_client_does_not_retry_401() -> None:
+    client, mock_openai = _make_client_with_mock()
+    client.initial_backoff_ms = 1
+
+    err_401 = RuntimeError("Unauthorized")
+    err_401.status_code = 401
+
+    mock_openai.chat.completions.create.side_effect = err_401
+
+    with pytest.raises(RuntimeError, match="Unauthorized"):
+        client.chat_complete([{"role": "user", "content": "hi"}], model="big")
+
+    assert mock_openai.chat.completions.create.call_count == 1
+
+
+def test_client_exhausts_retries_and_reraises_404() -> None:
+    client, mock_openai = _make_client_with_mock()
+    client.initial_backoff_ms = 1
+    client.max_retries = 2
+
+    err_404 = RuntimeError("Gateway 404")
+    err_404.status_code = 404
+
+    mock_openai.chat.completions.create.side_effect = err_404
+
+    with pytest.raises(RuntimeError, match="Gateway 404"):
+        client.chat_complete([{"role": "user", "content": "hi"}], model="big")
+
+    assert mock_openai.chat.completions.create.call_count == 3  # initial + 2 retries
+

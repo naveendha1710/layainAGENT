@@ -45,25 +45,37 @@ class LLMResponse:
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
+try:
+    from openai import APIStatusError, OpenAI  # type: ignore
+except ImportError:
+    APIStatusError = None
+    OpenAI = None
+
+
 def _import_openai():
-    try:
-        from openai import OpenAI  # type: ignore
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise LLMError(
-            "The 'openai' package is required to call the NVIDIA Build API. "
-            "Install it with: pip install openai>=1.0"
-        ) from exc
+    global OpenAI
+    if OpenAI is None:
+        try:
+            from openai import OpenAI as _OpenAI  # type: ignore
+            OpenAI = _OpenAI
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise LLMError(
+                "The 'openai' package is required to call the NVIDIA Build API. "
+                "Install it with: pip install openai>=1.0"
+            ) from exc
     return OpenAI
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Return True if ``exc`` looks like a transient 429/5xx provider error."""
+    """Return True if ``exc`` looks like a transient 404/429/5xx provider error."""
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status is not None:
-        return status == 429 or 500 <= status < 600
+        return status in (404, 429, 500, 502, 503, 504) or (isinstance(status, int) and 500 <= status < 600)
     msg = str(exc).lower()
     return (
-        "429" in msg
+        "404" in msg
+        or "not found" in msg
+        or "429" in msg
         or "rate limit" in msg
         or any(code in msg for code in ("500", "502", "503", "504"))
     )
@@ -219,9 +231,11 @@ class NVIDIABuildClient:
         eff_max_tokens = max_tokens if max_tokens is not None else kwargs.get("max_tokens", 512)
         start = time.perf_counter()
         last_error: Optional[Exception] = None
-        backoff_ms = self.initial_backoff_ms
+        initial_delay = max(0.05, self.initial_backoff_ms / 1000.0)
+        backoff_factor = 2.0
+        max_delay = self.max_backoff_ms / 1000.0
 
-        for attempt in range(self.max_retries + 1):
+        for attempt_idx in range(self.max_retries + 1):
             try:
                 create_kwargs: Dict[str, Any] = {
                     "model": target_model,
@@ -257,16 +271,40 @@ class NVIDIABuildClient:
                 )
             except Exception as exc:  # noqa: BLE001 - retry/backoff on provider errors
                 last_error = exc
-                # If error is not transient/retryable (e.g. 401, 404, bad request), immediately raise
-                # Never catch an API failure and swap the model tier.
-                if not _is_retryable(exc):
-                    raise exc
-                if attempt >= self.max_retries:
-                    raise exc
-                sleep_s = min(backoff_ms / 1000.0, self.max_backoff_ms / 1000.0)
-                # jitter: sleep in [sleep_s, 2 * sleep_s]
-                time.sleep(sleep_s + random.random() * sleep_s)
-                backoff_ms = min(backoff_ms * 2, self.max_backoff_ms)
+                err = exc
+                status_code = getattr(err, "status_code", None) or getattr(err, "status", None)
+
+                # Check if error is transient/retryable gateway error (404, 429, 500, 502, 503, 504)
+                is_status_err = (APIStatusError is not None and isinstance(err, APIStatusError)) or (status_code is not None)
+                is_transient_status = (status_code in (404, 429, 500, 502, 503, 504)) or (isinstance(status_code, int) and 500 <= status_code < 600)
+
+                if is_status_err:
+                    if not is_transient_status:
+                        raise err
+                elif not _is_retryable(err):
+                    raise err
+
+                attempt = attempt_idx + 1
+                if attempt > self.max_retries:
+                    raise err
+
+                if not hasattr(err, "status_code"):
+                    try:
+                        setattr(err, "status_code", status_code or 503)
+                    except Exception:
+                        pass
+
+                # Exponential backoff with jitter: delay = initial_delay * (backoff_factor ** (attempt - 1)) + jitter
+                base_delay = min(initial_delay * (backoff_factor ** (attempt - 1)), max_delay)
+                jitter = random.uniform(0.1, 0.5) * base_delay
+                delay = min(base_delay + jitter, max_delay)
+
+                code_val = getattr(err, "status_code", status_code or "ERROR")
+                print(
+                    f"  [Warn] NVIDIA NIM transient HTTP {code_val}. Retrying in {delay:.1f}s (attempt {attempt}/{self.max_retries}) ...",
+                    flush=True,
+                )
+                time.sleep(delay)
 
         raise last_error if last_error is not None else RuntimeError("LLM call failed.")
 
