@@ -9,10 +9,26 @@ from __future__ import annotations
 
 import inspect
 import json as _json
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+
+def _safe_glyphs() -> Tuple[str, str]:
+    """Return tree-drawing glyphs compatible with stdout encoding."""
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        "├─".encode(getattr(sys.stdout, "encoding", "utf-8") or "utf-8")
+        return "├─", "└─"
+    except Exception:
+        return "|-", "`-"
 
 from laya_agent.agent.core.state import AgentState, StepRecord
 from laya_agent.agent.gates.base import Decision, Gate, GateResult
@@ -60,6 +76,7 @@ class ReActLoop:
         policy_store: Optional[Any] = None,
         policy_top_k: int = 10,
         config: Optional[LoopConfig] = None,
+        verbose: bool = False,
     ) -> None:
         self.state = state
         self.hooks = hooks
@@ -68,6 +85,7 @@ class ReActLoop:
         self.policy_store = policy_store
         self.policy_top_k = policy_top_k
         self.config = config or LoopConfig(max_steps=state.max_steps)
+        self.verbose = verbose
 
     # ------------------------------------------------------------------
     # gate helpers
@@ -85,7 +103,11 @@ class ReActLoop:
         self,
         initial_prompt: str,
         candidate_policies: Optional[Sequence[Any]] = None,
+        verbose: Optional[bool] = None,
     ) -> AgentState:
+        is_verbose = self.verbose if verbose is None else bool(verbose)
+        g_branch, g_tee = _safe_glyphs()
+
         # [D] Policy Retrieval & Applicability Filter Gate
         candidates = list(candidate_policies) if candidate_policies is not None else []
         if not candidates and self.policy_store is not None:
@@ -119,6 +141,8 @@ class ReActLoop:
                 ))
                 if filter_result.decision == Decision.KEEP:
                     retained_policies.append(cand)
+                if is_verbose:
+                    print(f"  {g_branch} [Pre-Loop] Gate: Filter ({filter_result.latency_ms:.1f}ms) -> {rule_id}: {filter_result.decision.value} (conf: {filter_result.confidence:.2f})", flush=True)
             else:
                 # Filter hook disabled/not configured -> retain policy unconditionally (Arms A, B, C)
                 retained_policies.append(cand)
@@ -192,6 +216,9 @@ class ReActLoop:
             elif scorer_result.decision == Decision.SMALL:
                 self.state.max_steps = 4
 
+            if is_verbose:
+                print(f"  {g_branch} [Turn 0] Gate: Scorer ({scorer_result.latency_ms:.1f}ms) -> Choice: {scorer_result.decision.value} (conf: {scorer_result.confidence:.2f})", flush=True)
+
         while self.state.can_continue():
             # --- PLAN / reason via LLM (unless router says bypass) ---
             router_result = self._run_hook(
@@ -211,6 +238,8 @@ class ReActLoop:
                     raw=router_result.raw_output,
                 ))
                 call_llm = (router_result.decision == Decision.CALL_LLM)
+                if is_verbose:
+                    print(f"  {g_branch} [Turn {self.state.turn}] Gate: Router ({router_result.latency_ms:.1f}ms) -> Choice: {router_result.decision.value} (conf: {router_result.confidence:.2f})", flush=True)
 
             tool_name: Optional[str] = None
             tool_args: Dict[str, Any] = {}
@@ -220,10 +249,14 @@ class ReActLoop:
                 deterministic_action = self._resolve_deterministic_action(router_result)
                 if deterministic_action is not None:
                     tool_name, tool_args = deterministic_action
+                    if is_verbose:
+                        print(f"  {g_branch} [Turn {self.state.turn}] Router Bypass active -> Action: {tool_name}", flush=True)
                 elif self._is_trivial_greeting_or_close(self.state.get_user_prompt()):
                     self.state.finished = True
                     self.state.final_answer = "Hello! Task completed. [TASK_COMPLETE]"
                     self.state.stop_reason = "final_answer"
+                    if is_verbose:
+                        print(f"  {g_tee} [Turn {self.state.turn}] Final Answer: Trivial greeting completed.", flush=True)
                     break
                 else:
                     # No pending action or confirmation -> do NOT execute noop. Fall back to LLM.
@@ -239,19 +272,28 @@ class ReActLoop:
                 except Exception:
                     pass
 
+                # Resolve target model name for display
+                if hasattr(self.llm_client, "get_model_for_tier"):
+                    display_model_name = self.llm_client.get_model_for_tier(self.state.model_tier or "big")
+                elif self.state.model_tier == "small":
+                    display_model_name = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+                else:
+                    display_model_name = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+
+                if is_verbose:
+                    print(f"  {g_branch} [Turn {self.state.turn}] Calling LLM ({display_model_name}) ... ", end="", flush=True)
+
                 t0 = time.perf_counter()
                 response = self.llm_client.chat_complete(self.state.messages, **model_kwarg)
                 llm_latency_ms = (time.perf_counter() - t0) * 1000.0
 
+                if is_verbose:
+                    print(f"done ({llm_latency_ms:.0f}ms | {response.input_tokens}+{response.output_tokens} tok)", flush=True)
+
                 # Resolve exact model name for telemetry logging
                 model_decision = getattr(response, "model", None) or ""
                 if model_decision in ("big", "small", "mock-default-model", "default", "", None):
-                    if hasattr(self.llm_client, "get_model_for_tier"):
-                        model_decision = self.llm_client.get_model_for_tier(self.state.model_tier or "big")
-                    elif self.state.model_tier == "small":
-                        model_decision = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
-                    else:
-                        model_decision = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+                    model_decision = display_model_name
 
                 self.state.record_step(StepRecord(
                     step=self.state.step,
@@ -274,11 +316,17 @@ class ReActLoop:
                     self.state.finished = True
                     self.state.final_answer = response.content
                     self.state.stop_reason = "final_answer"
+                    if is_verbose:
+                        print(f"  {g_tee} [Turn {self.state.turn}] Final Answer emitted.", flush=True)
                     break
                 tool_name, tool_args = parsed
 
             # --- ACT / execute tool ---
             tool_result = self._execute_tool(tool_name, tool_args)
+            if is_verbose:
+                args_display = _json.dumps(tool_args) if isinstance(tool_args, dict) else str(tool_args)
+                status_str = "OK" if tool_result.ok else "ERROR"
+                print(f"  {g_branch} [Turn {self.state.turn}] Executing Tool: {tool_name} {args_display} -> {status_str}", flush=True)
 
             # --- OBSERVE: firewall on tool output ---
             user_prompt = self.state.get_user_prompt()
@@ -305,6 +353,14 @@ class ReActLoop:
                     observation = "[FIREWALL: Tool output redacted due to suspected injection]"
                 elif "sanitized_output" in firewall_result.raw_output:
                     observation = str(firewall_result.raw_output["sanitized_output"])
+
+                if is_verbose:
+                    raw_fw = firewall_result.raw_output if isinstance(firewall_result.raw_output, dict) else {}
+                    redacted = raw_fw.get("redacted_chunks", raw_fw.get("chunks_redacted", 0))
+                    if not redacted and firewall_result.decision == Decision.REDACT:
+                        redacted = 1
+                    decision_str = "pass" if firewall_result.decision == Decision.PASS else firewall_result.decision.value.lower()
+                    print(f"  {g_branch} [Turn {self.state.turn}] Gate: Firewall ({firewall_result.latency_ms:.1f}ms) -> {decision_str} ({redacted} chunks redacted)", flush=True)
 
             self.state.messages.append({"role": "user", "content": observation})
             self.state.record_step(StepRecord(
@@ -334,6 +390,10 @@ class ReActLoop:
                     latency_ms=supervisor_result.latency_ms,
                     raw=supervisor_result.raw_output,
                 ))
+                if is_verbose:
+                    sup_decision = "continue" if supervisor_result.decision == Decision.CONTINUE else supervisor_result.decision.value.lower()
+                    print(f"  {g_tee} [Turn {self.state.turn}] Gate: Supervisor ({supervisor_result.latency_ms:.1f}ms) -> Decision: {sup_decision}", flush=True)
+
                 if supervisor_result.decision == Decision.STOP:
                     self.state.finished = True
                     self.state.stop_reason = "supervisor_stop"

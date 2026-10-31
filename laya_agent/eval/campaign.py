@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
@@ -130,6 +131,7 @@ class MultiArmCampaign:
         pricing: Optional[Dict[str, Dict[str, float]]] = None,
         load_weights: Optional[bool] = None,
         allow_mock_llm: bool = False,
+        verbose: bool = True,
     ) -> None:
         self.output_dir = Path(output_dir)
         if list(arms) == ["all"] or "all" in arms:
@@ -143,6 +145,7 @@ class MultiArmCampaign:
         self.pricing = pricing
         self.load_weights = load_weights
         self.allow_mock_llm = bool(allow_mock_llm)
+        self.verbose = bool(verbose)
 
     def load_completed_keys(self, trace_path: Path) -> Set[Tuple[str, str, int]]:
         """Load set of completed (arm, task_id, run_idx) tuples from existing JSONL trace."""
@@ -195,8 +198,10 @@ class MultiArmCampaign:
         load_weights: Optional[bool] = None,
         force_rerun: bool = False,
         max_tasks: Optional[int] = None,
+        verbose: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Execute the campaign across all configured arms."""
+        is_verbose = self.verbose if verbose is None else bool(verbose)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         task_specs = list(tasks) if tasks is not None else self.load_split_runs()
         if max_tasks is not None and max_tasks > 0:
@@ -244,7 +249,6 @@ class MultiArmCampaign:
         else:
             big_model = getattr(llm, "model", "default")
             small_model = getattr(llm, "small_model", "default")
-        print(f"LLM Client: {type(llm).__name__} | Big Tier: {big_model} | Small Tier: {small_model}")
 
         effective_load_weights = load_weights if load_weights is not None else self.load_weights
 
@@ -257,7 +261,17 @@ class MultiArmCampaign:
 
         device = "cuda" if cuda_avail else "cpu"
         provider_name = "LayaProvider" if cuda_avail else "MockProvider"
-        print(f"Runner initialized using Provider: {provider_name} on device: {device}")
+
+        unique_pairs = len(set(spec.pair_id for spec in task_specs))
+        runs_per_arm = len(task_specs)
+        total_runs = len(self.arms) * runs_per_arm
+        triplets_str = f"Triplets: {runs_per_arm} runs/arm" if runs_per_arm == unique_pairs * 3 else f"{runs_per_arm} runs/arm"
+
+        print("=" * 70, flush=True)
+        print("LAYA Agent Evaluation Campaign", flush=True)
+        print(f"Split: {self.split} | Arms: {len(self.arms)} | Tasks: {unique_pairs} ({triplets_str}) | Total Runs: {total_runs}", flush=True)
+        print(f"LLM Client: {type(llm).__name__} | Device: {device}", flush=True)
+        print("=" * 70, flush=True)
 
         # Engine resolution
         if runtime is None and cuda_avail:
@@ -277,6 +291,7 @@ class MultiArmCampaign:
         executed_count = 0
         skipped_count = 0
         arm_trace_paths: Dict[str, Path] = {}
+        run_num = 0
 
         for arm in self.arms:
             arm_trace_path = self.output_dir / f"arm_{arm}.jsonl"
@@ -298,10 +313,20 @@ class MultiArmCampaign:
                 arm_load_weights = True if (torch.cuda.is_available() and arm.upper() in {"B", "B_REGEX", "C", "C_ALWAYS_SMALL", "C_RANDOM", "D"}) else False
 
             for task in task_specs:
+                run_num += 1
                 run_key = (arm, task.task_id, self.seed)
+                condition = task.condition or ("injection" if task.is_injection else "benign")
+
                 if run_key in completed_keys:
                     skipped_count += 1
+                    if is_verbose:
+                        print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ... SKIPPED (checkpoint)", flush=True)
                     continue
+
+                if not is_verbose:
+                    print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ... ", end="", flush=True)
+                else:
+                    print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ...", flush=True)
 
                 if tool_registry is not None:
                     tools = tool_registry
@@ -309,7 +334,8 @@ class MultiArmCampaign:
                 else:
                     tools, sb = build_sandbox_tool_registry(task)
 
-                runner.run_task(
+                t_start = time.perf_counter()
+                task_state = runner.run_task(
                     task_id=task.task_id,
                     pair_id=task.pair_id,
                     split=self.split,
@@ -329,9 +355,40 @@ class MultiArmCampaign:
                     load_weights=arm_load_weights,
                     sandbox=sb,
                     expected_benign_tools=getattr(task, "expected_benign_tools", []),
+                    verbose=is_verbose,
                 )
+                elapsed_s = time.perf_counter() - t_start
                 executed_count += 1
                 completed_keys.add(run_key)
+
+                # Determine outcome label
+                outcome_label = getattr(task_state, "outcome_label", None)
+                if task.is_injection:
+                    if outcome_label == "attack_succeeded":
+                        outcome_str = "ASR: PENETRATED"
+                    else:
+                        outcome_str = "ASR: BLOCKED"
+                else:
+                    if outcome_label == "task_completed":
+                        outcome_str = "Utility: PASS"
+                    else:
+                        outcome_str = "Utility: FAIL"
+
+                # Calculate run cost
+                in_tok = task_state.total_input_tokens
+                out_tok = task_state.total_output_tokens
+                tier = task_state.model_tier or "big"
+                pricing = self.pricing or {}
+                tier_sheet = pricing.get(tier.lower(), pricing.get("big", {"input_per_1m": 0.8, "output_per_1m": 2.4}))
+                cost_usd = (in_tok * (tier_sheet.get("input_per_1m", 0.0) / 1_000_000.0)) + (out_tok * (tier_sheet.get("output_per_1m", 0.0) / 1_000_000.0))
+
+                turns_count = task_state.turn or 1
+                turns_label = f"{turns_count} turn" if turns_count == 1 else f"{turns_count} turns"
+
+                if not is_verbose:
+                    print(f"DONE ({elapsed_s:.1f}s | {turns_label} | Cost: ${cost_usd:.4f} | {outcome_str})", flush=True)
+                else:
+                    print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ... DONE ({elapsed_s:.1f}s | {turns_label} | Cost: ${cost_usd:.4f} | {outcome_str})", flush=True)
 
         # Build / sync combined trace file from all arm traces
         with open(combined_trace_path, "w", encoding="utf-8") as out_f:
@@ -374,6 +431,8 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum steps per task")
     parser.add_argument("--force-rerun", action="store_true", help="Ignore existing checkpoints and rerun all tasks")
     parser.add_argument("--allow-mock-llm", action="store_true", help="Allow fallback to simulated mock LLM for offline testing")
+    parser.add_argument("--verbose", action="store_true", default=True, help="Enable live real-time step telemetry stream")
+    parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable live real-time step telemetry stream")
 
     args = parser.parse_args()
 
@@ -387,13 +446,18 @@ def main() -> None:
         max_steps=args.max_steps,
         n_boot=args.n_boot,
         allow_mock_llm=args.allow_mock_llm,
+        verbose=args.verbose,
     )
-    result = campaign.run(force_rerun=args.force_rerun, max_tasks=args.max_tasks)
-    print(f"Campaign completed. Executed: {result['executed']}, Skipped: {result['skipped']}")
-    print(f"Traces written to: {result['trace_path']}")
+    result = campaign.run(force_rerun=args.force_rerun, max_tasks=args.max_tasks, verbose=args.verbose)
+    print(f"Campaign completed. Executed: {result['executed']}, Skipped: {result['skipped']}", flush=True)
+    print(f"Traces written to: {result['trace_path']}", flush=True)
     for name, path in result["files"].items():
-        print(f"  {name}: {path}")
+        print(f"  {name}: {path}", flush=True)
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except (AttributeError, TypeError):
+        pass
     main()

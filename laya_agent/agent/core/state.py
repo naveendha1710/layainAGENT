@@ -48,6 +48,7 @@ class AgentState:
     finished: bool = False
     final_answer: Optional[str] = None
     stop_reason: Optional[str] = None
+    outcome_label: Optional[str] = None
 
     messages: List[Dict[str, str]] = field(default_factory=list)
     trajectory: List[StepRecord] = field(default_factory=list)

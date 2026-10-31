@@ -33,9 +33,11 @@ class ArmABaseline:
         policy_store: Optional[Any] = None,
         policy_top_k: int = 10,
         max_steps: int = 10,
+        verbose: bool = False,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
+        self.verbose = verbose
         self.loop = ReActLoop(
             state=state,
             hooks={},  # all gates off for Arm A
@@ -43,14 +45,17 @@ class ArmABaseline:
             tool_registry=tool_registry,
             policy_store=policy_store,
             policy_top_k=policy_top_k,
+            verbose=verbose,
         )
 
     def run(
         self,
         initial_prompt: str,
         candidate_policies: Optional[Sequence[Any]] = None,
+        verbose: Optional[bool] = None,
     ) -> AgentState:
-        return self.loop.run(initial_prompt, candidate_policies=candidate_policies)
+        eff_verbose = self.verbose if verbose is None else verbose
+        return self.loop.run(initial_prompt, candidate_policies=candidate_policies, verbose=eff_verbose)
 
 
 class ArmB:
@@ -72,9 +77,11 @@ class ArmB:
         tau_rel: float = 0.70,
         tau_supervisor: float = 0.50,
         load_weights: Optional[bool] = None,
+        verbose: bool = False,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
+        self.verbose = verbose
 
         firewall_gate = ContextFirewall(
             tau_inj=tau_inj,
@@ -116,14 +123,17 @@ class ArmB:
             tool_registry=tool_registry,
             policy_store=policy_store,
             policy_top_k=policy_top_k,
+            verbose=verbose,
         )
 
     def run(
         self,
         initial_prompt: str,
         candidate_policies: Optional[Sequence[Any]] = None,
+        verbose: Optional[bool] = None,
     ) -> AgentState:
-        return self.loop.run(initial_prompt, candidate_policies=candidate_policies)
+        eff_verbose = self.verbose if verbose is None else verbose
+        return self.loop.run(initial_prompt, candidate_policies=candidate_policies, verbose=eff_verbose)
 
 
 class ArmC:
@@ -149,9 +159,11 @@ class ArmC:
         tau_supervisor: float = 0.50,
         seed: Optional[int] = 42,
         load_weights: Optional[bool] = None,
+        verbose: bool = False,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
+        self.verbose = verbose
 
         scorer_gate = ScorerGate(
             tau=tau_scorer,
@@ -208,14 +220,17 @@ class ArmC:
             tool_registry=tool_registry,
             policy_store=policy_store,
             policy_top_k=policy_top_k,
+            verbose=verbose,
         )
 
     def run(
         self,
         initial_prompt: str,
         candidate_policies: Optional[Sequence[Any]] = None,
+        verbose: Optional[bool] = None,
     ) -> AgentState:
-        return self.loop.run(initial_prompt, candidate_policies=candidate_policies)
+        eff_verbose = self.verbose if verbose is None else verbose
+        return self.loop.run(initial_prompt, candidate_policies=candidate_policies, verbose=eff_verbose)
 
 
 class ArmD:
@@ -247,9 +262,11 @@ class ArmD:
         tau_supervisor: float = 0.50,
         seed: Optional[int] = 42,
         load_weights: Optional[bool] = None,
+        verbose: bool = False,
     ) -> None:
         self.state = state
         self.state.max_steps = max_steps
+        self.verbose = verbose
 
         scorer_gate = ScorerGate(
             tau=tau_scorer,
@@ -334,14 +351,17 @@ class ArmD:
             tool_registry=tool_registry,
             policy_store=policy_store,
             policy_top_k=policy_top_k,
+            verbose=verbose,
         )
 
     def run(
         self,
         initial_prompt: str,
         candidate_policies: Optional[Sequence[Any]] = None,
+        verbose: Optional[bool] = None,
     ) -> AgentState:
-        return self.loop.run(initial_prompt, candidate_policies=candidate_policies)
+        eff_verbose = self.verbose if verbose is None else verbose
+        return self.loop.run(initial_prompt, candidate_policies=candidate_policies, verbose=eff_verbose)
 
 
 def create_agent(
@@ -365,6 +385,7 @@ def create_agent(
     tau_supervisor: float = 0.50,
     seed: Optional[int] = 42,
     load_weights: Optional[bool] = None,
+    verbose: bool = False,
 ) -> Any:
     """Factory creating the appropriate agent controller for the requested arm."""
     arm_key = arm.strip()
@@ -377,6 +398,7 @@ def create_agent(
             policy_store=policy_store,
             policy_top_k=policy_top_k,
             max_steps=max_steps,
+            verbose=verbose,
         )
     elif arm_key.lower() == "b_regex":
         return ArmB(
@@ -394,6 +416,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             load_weights=load_weights,
+            verbose=verbose,
         )
     elif arm_key in {"B", "b"}:
         return ArmB(
@@ -411,6 +434,7 @@ def create_agent(
             tau_rel=tau_rel,
             tau_supervisor=tau_supervisor,
             load_weights=load_weights,
+            verbose=verbose,
         )
     elif arm_key.lower() == "c_always_small":
         return ArmC(
@@ -432,6 +456,7 @@ def create_agent(
             tau_supervisor=tau_supervisor,
             seed=seed,
             load_weights=load_weights,
+            verbose=verbose,
         )
     elif arm_key.lower() == "c_random":
         return ArmC(
@@ -453,6 +478,7 @@ def create_agent(
             tau_supervisor=tau_supervisor,
             seed=seed,
             load_weights=load_weights,
+            verbose=verbose,
         )
     elif arm_key in {"C", "c"}:
         return ArmC(
@@ -474,6 +500,7 @@ def create_agent(
             tau_supervisor=tau_supervisor,
             seed=seed,
             load_weights=load_weights,
+            verbose=verbose,
         )
     elif arm_key in {"D", "d"}:
         return ArmD(
@@ -501,6 +528,7 @@ def create_agent(
             tau_supervisor=tau_supervisor,
             seed=seed,
             load_weights=load_weights,
+            verbose=verbose,
         )
     else:
         # Default fallback to Arm D (Full LAYA)
@@ -529,6 +557,7 @@ def create_agent(
             tau_supervisor=tau_supervisor,
             seed=seed,
             load_weights=load_weights,
+            verbose=verbose,
         )
 
 
