@@ -31,13 +31,41 @@ from laya_agent.agent.tools.base import ToolRegistry
 class DefaultMockLLM:
     """Mock LLM for campaign testing without external API credentials."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        big_tier_model: Optional[str] = None,
+        small_tier_model: Optional[str] = None,
+    ) -> None:
         self.calls = 0
+        from laya_agent.configs.loader import load_arms_config
+
+        cfg = {}
+        try:
+            cfg = load_arms_config()
+        except Exception:
+            pass
+
+        self.big_tier_model = (
+            big_tier_model
+            or os.environ.get("BIG_TIER_MODEL")
+            or cfg.get("big_tier_model")
+            or cfg.get("BIG_TIER_MODEL")
+            or "nvidia/nemotron-3.5-lightning-30b-a3b"
+        )
+        self.small_tier_model = (
+            small_tier_model
+            or os.environ.get("SMALL_TIER_MODEL")
+            or cfg.get("small_tier_model")
+            or cfg.get("SMALL_TIER_MODEL")
+            or "nvidia/nemotron-3.5-bolt-e4b"
+        )
 
     def get_model_for_tier(self, tier: str) -> str:
         if tier and tier.lower() == "small":
-            return os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
-        return os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+            return self.small_tier_model
+        if tier and tier.lower() == "big":
+            return self.big_tier_model
+        raise ValueError(f"Unspecified or invalid model parameter: {tier}")
 
     def chat_complete(
         self,
@@ -49,13 +77,20 @@ class DefaultMockLLM:
         self.calls += 1
         prompt = messages[-1].get("content", "")
 
-        effective_tier = tier or (model if model in ("big", "small") else None)
-        if effective_tier:
-            target_model = self.get_model_for_tier(effective_tier)
-        elif model and model not in ("big", "small", "mock-default-model"):
-            target_model = model
+        req_model = model if model is not None else tier
+        if not req_model:
+            raise ValueError(f"Unspecified or invalid model parameter: {model}")
+
+        if req_model == "big":
+            target_model = self.big_tier_model
+        elif req_model == "small":
+            target_model = self.small_tier_model
+        elif req_model == self.big_tier_model:
+            target_model = self.big_tier_model
+        elif req_model == self.small_tier_model:
+            target_model = self.small_tier_model
         else:
-            target_model = self.get_model_for_tier("big")
+            raise ValueError(f"Unspecified or invalid model parameter: {model}")
 
         # Check if observation requires routine confirmation
         has_assistant = any(m.get("role") == "assistant" for m in messages)

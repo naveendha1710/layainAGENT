@@ -30,39 +30,45 @@ def test_tier_small_resolves_to_small_model() -> None:
     client, mock_openai = _make_client_with_mock()
     client.chat_complete([{"role": "user", "content": "hi"}], tier="small")
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "meta/llama-3.1-8b-instruct"
+    assert call_kwargs["model"] == "nvidia/nemotron-3.5-bolt-e4b"
 
 
 def test_tier_big_resolves_to_big_model() -> None:
     client, mock_openai = _make_client_with_mock()
     client.chat_complete([{"role": "user", "content": "hi"}], tier="big")
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "meta/llama-3.1-70b-instruct"
+    assert call_kwargs["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
 def test_model_literal_small_resolves_to_small_model() -> None:
     client, mock_openai = _make_client_with_mock()
     client.chat_complete([{"role": "user", "content": "hi"}], model="small")
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "meta/llama-3.1-8b-instruct"
+    assert call_kwargs["model"] == "nvidia/nemotron-3.5-bolt-e4b"
 
 
 def test_model_literal_big_resolves_to_big_model() -> None:
     client, mock_openai = _make_client_with_mock()
     client.chat_complete([{"role": "user", "content": "hi"}], model="big")
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "meta/llama-3.1-70b-instruct"
+    assert call_kwargs["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
-def test_explicit_custom_model_is_preserved() -> None:
-    client, mock_openai = _make_client_with_mock()
-    client.chat_complete([{"role": "user", "content": "hi"}], model="custom/my-model:latest")
-    call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "custom/my-model:latest"
+def test_unmapped_model_raises_value_error() -> None:
+    client, _ = _make_client_with_mock()
+    with pytest.raises(ValueError, match="Unspecified or invalid model parameter"):
+        client.chat_complete([{"role": "user", "content": "hi"}], model="custom/unmapped-model")
 
 
-def test_default_without_tier_or_model_resolves_to_big_model() -> None:
-    client, mock_openai = _make_client_with_mock()
-    client.chat_complete([{"role": "user", "content": "hi"}])
-    call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "meta/llama-3.1-70b-instruct"
+def test_missing_model_raises_value_error() -> None:
+    client, _ = _make_client_with_mock()
+    with pytest.raises(ValueError, match="Unspecified or invalid model parameter"):
+        client.chat_complete([{"role": "user", "content": "hi"}])
+
+
+def test_missing_tier_config_raises_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BIG_TIER_MODEL", raising=False)
+    monkeypatch.delenv("SMALL_TIER_MODEL", raising=False)
+    monkeypatch.setenv("LAYA_CONFIG_PATH", "non_existent_config.yaml")
+    with pytest.raises(ValueError, match="Research evaluation requires explicit BIG_TIER_MODEL and SMALL_TIER_MODEL"):
+        NVIDIABuildClient(api_key="mock-key", big_tier_model=None, small_tier_model=None)

@@ -90,7 +90,9 @@ class NVIDIABuildClient:
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: str = "meta/llama-3.1-70b-instruct",
+        big_tier_model: Optional[str] = None,
+        small_tier_model: Optional[str] = None,
+        model: Optional[str] = None,
         small_model: Optional[str] = None,
         temperature: float = 0.0,
         max_retries: int = 5,
@@ -118,19 +120,50 @@ class NVIDIABuildClient:
         if not raw_base_url.endswith("/v1"):
             raw_base_url += "/v1"
         self.base_url = raw_base_url
-        if model in ("big", "default", "", None):
-            self.model = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
-        elif model == "small":
-            self.model = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
-        else:
-            self.model = model
 
-        if small_model in ("small", "default", "", None):
-            self.small_model = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
-        elif small_model == "big":
-            self.small_model = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
-        else:
-            self.small_model = small_model
+        # Resolve explicit big and small tier models strictly without silent arbitrary defaults
+        big = (
+            big_tier_model
+            or model
+            or os.environ.get("BIG_TIER_MODEL")
+            or os.environ.get("big_tier_model")
+        )
+        small = (
+            small_tier_model
+            or small_model
+            or os.environ.get("SMALL_TIER_MODEL")
+            or os.environ.get("small_tier_model")
+        )
+
+        if not big or not small:
+            # Fall back strictly to arms.yaml configuration
+            try:
+                from laya_agent.configs.loader import load_arms_config
+
+                cfg = load_arms_config()
+                if not big:
+                    big = cfg.get("big_tier_model") or cfg.get("BIG_TIER_MODEL")
+                if not small:
+                    small = cfg.get("small_tier_model") or cfg.get("SMALL_TIER_MODEL")
+            except Exception:
+                pass
+
+        if not big or not small:
+            raise ValueError(
+                "Research evaluation requires explicit BIG_TIER_MODEL and SMALL_TIER_MODEL. "
+                "Silent model fallbacks are disallowed."
+            )
+
+        self.big_tier_model = str(big).strip()
+        self.small_tier_model = str(small).strip()
+        if not self.big_tier_model or not self.small_tier_model:
+            raise ValueError(
+                "Research evaluation requires explicit BIG_TIER_MODEL and SMALL_TIER_MODEL. "
+                "Silent model fallbacks are disallowed."
+            )
+
+        self.model = self.big_tier_model
+        self.small_model = self.small_tier_model
         self.temperature = temperature
         self.max_retries = max_retries
         self.initial_backoff_ms = initial_backoff_ms
@@ -140,9 +173,11 @@ class NVIDIABuildClient:
 
     def get_model_for_tier(self, tier: str) -> str:
         """Resolve model name for the requested tier ('small' vs 'big')."""
-        if tier.lower() == "small":
-            return os.environ.get("SMALL_TIER_MODEL", self.small_model or "meta/llama-3.1-8b-instruct")
-        return os.environ.get("BIG_TIER_MODEL", self.model or "meta/llama-3.1-70b-instruct")
+        if tier and tier.lower() == "small":
+            return self.small_tier_model
+        if tier and tier.lower() == "big":
+            return self.big_tier_model
+        raise ValueError(f"Unspecified or invalid model parameter: {tier}")
 
     @property
     def client(self) -> Any:
@@ -157,25 +192,26 @@ class NVIDIABuildClient:
         self,
         messages: Sequence[Dict[str, str]],
         model: Optional[str] = None,
-        tier: Optional[str] = None,
         temperature: Optional[float] = None,
         timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Run a chat completion with retry/backoff and latency tracking."""
-        # Resolve requested tier
-        effective_tier = tier or (model if model in ("big", "small") else None)
+        # Require model parameter (or allow tier kwarg), strictly mapped without silent fallbacks
+        req_model = model if model is not None else kwargs.get("tier")
+        if not req_model:
+            raise ValueError(f"Unspecified or invalid model parameter: {model}")
 
-        if effective_tier:
-            target_model = self.get_model_for_tier(effective_tier)
-        elif model and model not in ("big", "small", "default"):
-            target_model = model
+        if req_model == "big":
+            target_model = self.big_tier_model
+        elif req_model == "small":
+            target_model = self.small_tier_model
+        elif req_model == self.big_tier_model:
+            target_model = self.big_tier_model
+        elif req_model == self.small_tier_model:
+            target_model = self.small_tier_model
         else:
-            target_model = self.get_model_for_tier("big")
-
-        # Safety guard: ensure the string sent over HTTP is never literally 'big' or 'small'
-        if target_model in ("big", "small", "default", ""):
-            target_model = self.get_model_for_tier(target_model if target_model in ("big", "small") else "big")
+            raise ValueError(f"Unspecified or invalid model parameter: {model}")
 
         temperature = self.temperature if temperature is None else temperature
         timeout = timeout if timeout is not None else kwargs.get("timeout")
@@ -215,17 +251,18 @@ class NVIDIABuildClient:
                 )
             except Exception as exc:  # noqa: BLE001 - retry/backoff on provider errors
                 last_error = exc
-                if attempt >= self.max_retries or not _is_retryable(exc):
-                    break
+                # If error is not transient/retryable (e.g. 401, 404, bad request), immediately raise
+                # Never catch an API failure and swap the model tier.
+                if not _is_retryable(exc):
+                    raise exc
+                if attempt >= self.max_retries:
+                    raise exc
                 sleep_s = min(backoff_ms / 1000.0, self.max_backoff_ms / 1000.0)
                 # jitter: sleep in [sleep_s, 2 * sleep_s]
                 time.sleep(sleep_s + random.random() * sleep_s)
                 backoff_ms = min(backoff_ms * 2, self.max_backoff_ms)
 
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        raise LLMRateLimitError(
-            f"LLM call failed after {self.max_retries + 1} attempts: {last_error}"
-        )
+        raise last_error if last_error is not None else RuntimeError("LLM call failed.")
 
 
 __all__ = [

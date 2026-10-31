@@ -39,7 +39,11 @@ def resolve_tier_model(
     estimation).
     """
     pricing = (config.get("pricing") or {}).get(tier.value, {})
-    model = os.environ.get(env_var) or config.get(config_key)
+    model = (
+        os.environ.get(env_var)
+        or config.get(config_key)
+        or config.get(config_key.lower())
+    )
     if not model:
         raise ValueError(
             f"No model resolved for tier '{tier.value}': set {env_var} or "

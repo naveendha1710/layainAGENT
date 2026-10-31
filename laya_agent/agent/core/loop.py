@@ -263,22 +263,22 @@ class ReActLoop:
                     call_llm = True
 
             if call_llm:
-                model_kwarg = {"tier": self.state.model_tier} if self.state.model_tier else {}
+                req_model = self.state.model_tier or "big"
+                model_kwarg = {"model": req_model}
                 try:
                     sig = inspect.signature(self.llm_client.chat_complete)
-                    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                    if not has_kwargs and "tier" not in sig.parameters:
-                        model_kwarg = {"model": self.state.model_tier} if self.state.model_tier else {}
+                    if "tier" in sig.parameters:
+                        model_kwarg["tier"] = req_model
                 except Exception:
                     pass
 
                 # Resolve target model name for display
                 if hasattr(self.llm_client, "get_model_for_tier"):
-                    display_model_name = self.llm_client.get_model_for_tier(self.state.model_tier or "big")
-                elif self.state.model_tier == "small":
-                    display_model_name = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+                    display_model_name = self.llm_client.get_model_for_tier(req_model)
+                elif req_model == "small":
+                    display_model_name = os.environ.get("SMALL_TIER_MODEL", "nvidia/nemotron-3.5-bolt-e4b")
                 else:
-                    display_model_name = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+                    display_model_name = os.environ.get("BIG_TIER_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
                 if is_verbose:
                     print(f"  {g_branch} [Turn {self.state.turn}] Calling LLM ({display_model_name}) ... ", end="", flush=True)
