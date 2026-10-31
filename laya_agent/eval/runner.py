@@ -23,9 +23,15 @@ from laya_agent.tracing.trace import TraceLogger
 class ArmARunner:
     """Batch executor for Arm A, B, C, and D tasks."""
 
-    def __init__(self, *, trace_path: str = "eval_arm_A_smoke.jsonl") -> None:
+    def __init__(
+        self,
+        *,
+        trace_path: str = "eval_arm_A_smoke.jsonl",
+        combined_trace_path: Optional[str] = None,
+    ) -> None:
         self.trace_path = trace_path
         self.logger = TraceLogger(trace_path)
+        self.combined_logger = TraceLogger(combined_trace_path) if combined_trace_path else None
 
     def run_task(
         self,
@@ -115,7 +121,7 @@ class ArmARunner:
             llm_latency = rec.llm_latency_ms if rec.module == "llm" else 0.0
             gt_label = outcome_label or rec.raw.get("ground_truth_label") or ground_truth_label
 
-            self.logger.log(
+            log_kwargs = dict(
                 task_id=ctx["task_id"],
                 pair_id=ctx["pair_id"],
                 split=ctx["split"],
@@ -135,6 +141,9 @@ class ArmARunner:
                 tool_ok=rec.tool_ok,
                 ground_truth_label=gt_label,
             )
+            self.logger.log(**log_kwargs)
+            if self.combined_logger is not None:
+                self.combined_logger.log(**log_kwargs)
         return state
 
     def run_batch(

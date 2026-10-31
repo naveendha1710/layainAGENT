@@ -72,3 +72,10 @@ def test_missing_tier_config_raises_value_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("LAYA_CONFIG_PATH", "non_existent_config.yaml")
     with pytest.raises(ValueError, match="Research evaluation requires explicit BIG_TIER_MODEL and SMALL_TIER_MODEL"):
         NVIDIABuildClient(api_key="mock-key", big_tier_model=None, small_tier_model=None)
+
+
+def test_max_tokens_passed_to_openai_client() -> None:
+    client, mock_openai = _make_client_with_mock()
+    client.chat_complete([{"role": "user", "content": "hi"}], model="big", max_tokens=512)
+    call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+    assert call_kwargs["max_tokens"] == 512

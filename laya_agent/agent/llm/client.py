@@ -194,6 +194,7 @@ class NVIDIABuildClient:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         timeout: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Run a chat completion with retry/backoff and latency tracking."""
@@ -215,18 +216,23 @@ class NVIDIABuildClient:
 
         temperature = self.temperature if temperature is None else temperature
         timeout = timeout if timeout is not None else kwargs.get("timeout")
+        eff_max_tokens = max_tokens if max_tokens is not None else kwargs.get("max_tokens", 512)
         start = time.perf_counter()
         last_error: Optional[Exception] = None
         backoff_ms = self.initial_backoff_ms
 
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.client.chat.completions.create(
-                    model=target_model,
-                    messages=list(messages),
-                    temperature=temperature,
-                    timeout=timeout,
-                )
+                create_kwargs: Dict[str, Any] = {
+                    "model": target_model,
+                    "messages": list(messages),
+                    "temperature": temperature,
+                }
+                if timeout is not None:
+                    create_kwargs["timeout"] = timeout
+                if eff_max_tokens is not None:
+                    create_kwargs["max_tokens"] = eff_max_tokens
+                response = self.client.chat.completions.create(**create_kwargs)
                 latency_ms = (time.perf_counter() - start) * 1000.0
                 input_tokens, output_tokens = _extract_usage(response)
                 content = ""

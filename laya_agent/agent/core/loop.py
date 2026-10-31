@@ -54,6 +54,7 @@ class GateHook:
 class LoopConfig:
     max_steps: int = 10
     temperature: float = 0.0
+    max_tokens: int = 512
 
 
 @dataclass
@@ -84,7 +85,7 @@ class ReActLoop:
         self.tool_registry = tool_registry
         self.policy_store = policy_store
         self.policy_top_k = policy_top_k
-        self.config = config or LoopConfig(max_steps=state.max_steps)
+        self.config = config or LoopConfig(max_steps=state.max_steps, max_tokens=512)
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -264,11 +265,15 @@ class ReActLoop:
 
             if call_llm:
                 req_model = self.state.model_tier or "big"
-                model_kwarg = {"model": req_model}
+                max_tokens = getattr(self.config, "max_tokens", 512)
+                model_kwarg = {"model": req_model, "max_tokens": max_tokens}
                 try:
                     sig = inspect.signature(self.llm_client.chat_complete)
                     if "tier" in sig.parameters:
                         model_kwarg["tier"] = req_model
+                    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if not has_var_kw and "max_tokens" not in sig.parameters:
+                        model_kwarg.pop("max_tokens", None)
                 except Exception:
                     pass
 

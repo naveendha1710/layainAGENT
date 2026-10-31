@@ -167,6 +167,7 @@ class MultiArmCampaign:
         load_weights: Optional[bool] = None,
         allow_mock_llm: bool = False,
         verbose: bool = True,
+        resume: bool = True,
     ) -> None:
         self.output_dir = Path(output_dir)
         if list(arms) == ["all"] or "all" in arms:
@@ -181,13 +182,19 @@ class MultiArmCampaign:
         self.load_weights = load_weights
         self.allow_mock_llm = bool(allow_mock_llm)
         self.verbose = bool(verbose)
+        self.resume = bool(resume)
 
-    def load_completed_keys(self, trace_path: Path) -> Set[Tuple[str, str, int]]:
-        """Load set of completed (arm, task_id, run_idx) tuples from existing JSONL trace."""
-        completed: Set[Tuple[str, str, int]] = set()
+    def load_completed_keys(
+        self,
+        trace_path: Path,
+        task_condition_map: Optional[Dict[str, str]] = None,
+    ) -> Set[Tuple[str, str, str]]:
+        """Load set of completed (arm, task_id, condition) tuples from existing JSONL trace."""
+        completed: Set[Tuple[str, str, str]] = set()
         if not trace_path.exists():
             return completed
 
+        task_map = task_condition_map or {}
         with open(trace_path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -197,9 +204,20 @@ class MultiArmCampaign:
                     data = json.loads(line)
                     arm = str(data.get("arm", ""))
                     task_id = str(data.get("task_id", ""))
-                    run_idx = int(data.get("run_idx", 0))
+                    cond = data.get("condition") or task_map.get(task_id)
+                    if not cond:
+                        if task_id.endswith("_benign"):
+                            cond = "benign"
+                        elif task_id.endswith("_inj1"):
+                            cond = "injection_1"
+                        elif task_id.endswith("_inj2"):
+                            cond = "injection_2"
+                        elif "inj" in task_id or "attack" in str(data.get("ground_truth_label", "")):
+                            cond = "injection"
+                        else:
+                            cond = "benign"
                     if arm and task_id:
-                        completed.add((arm, task_id, run_idx))
+                        completed.add((arm, task_id, str(cond)))
                 except Exception:
                     continue
         return completed
@@ -232,11 +250,13 @@ class MultiArmCampaign:
         supervisor_engine: Optional[Any] = None,
         load_weights: Optional[bool] = None,
         force_rerun: bool = False,
+        resume: Optional[bool] = None,
         max_tasks: Optional[int] = None,
         verbose: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Execute the campaign across all configured arms."""
         is_verbose = self.verbose if verbose is None else bool(verbose)
+        effective_resume = bool(self.resume if resume is None else resume) and not force_rerun
         self.output_dir.mkdir(parents=True, exist_ok=True)
         task_specs = list(tasks) if tasks is not None else self.load_split_runs()
         if max_tasks is not None and max_tasks > 0:
@@ -319,9 +339,38 @@ class MultiArmCampaign:
         fw_eng = firewall_engine or runtime
         sup_eng = supervisor_engine or runtime
 
+        task_condition_map = {
+            spec.task_id: (spec.condition or ("injection" if spec.is_injection else "benign"))
+            for spec in task_specs
+        }
+
         combined_trace_path = self.output_dir / f"eval_campaign_{self.split}.jsonl"
-        if force_rerun and combined_trace_path.exists():
-            combined_trace_path.unlink()
+
+        completed_keys: Set[Tuple[str, str, str]] = set()
+        if effective_resume:
+            completed_keys = self.load_completed_keys(combined_trace_path, task_condition_map)
+            if combined_trace_path.exists():
+                for arm in self.arms:
+                    a_path = self.output_dir / f"arm_{arm}.jsonl"
+                    if not a_path.exists() or a_path.stat().st_size == 0:
+                        try:
+                            with open(combined_trace_path, "r", encoding="utf-8") as in_f, open(a_path, "w", encoding="utf-8") as out_f:
+                                for line in in_f:
+                                    try:
+                                        d = json.loads(line)
+                                        if d.get("arm") == arm:
+                                            out_f.write(line.strip() + "\n")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+        else:
+            if combined_trace_path.exists():
+                combined_trace_path.unlink()
+            for arm in self.arms:
+                a_path = self.output_dir / f"arm_{arm}.jsonl"
+                if a_path.exists():
+                    a_path.unlink()
 
         executed_count = 0
         skipped_count = 0
@@ -331,14 +380,16 @@ class MultiArmCampaign:
         for arm in self.arms:
             arm_trace_path = self.output_dir / f"arm_{arm}.jsonl"
             arm_trace_paths[arm] = arm_trace_path
-            if force_rerun and arm_trace_path.exists():
-                arm_trace_path.unlink()
 
-            completed_keys = set() if force_rerun else (
-                self.load_completed_keys(arm_trace_path) | self.load_completed_keys(combined_trace_path)
+            if effective_resume and arm_trace_path.exists():
+                completed_keys.update(self.load_completed_keys(arm_trace_path, task_condition_map))
+
+            completed_task_ids = {(k[0], k[1]) for k in completed_keys}
+
+            runner = ArmARunner(
+                trace_path=str(arm_trace_path),
+                combined_trace_path=str(combined_trace_path),
             )
-
-            runner = ArmARunner(trace_path=str(arm_trace_path))
 
             if effective_load_weights is not None:
                 arm_load_weights = effective_load_weights
@@ -349,13 +400,16 @@ class MultiArmCampaign:
 
             for task in task_specs:
                 run_num += 1
-                run_key = (arm, task.task_id, self.seed)
                 condition = task.condition or ("injection" if task.is_injection else "benign")
 
-                if run_key in completed_keys:
+                is_already_completed = effective_resume and (
+                    (arm, task.task_id, condition) in completed_keys
+                    or (arm, task.task_id) in completed_task_ids
+                )
+
+                if is_already_completed:
                     skipped_count += 1
-                    if is_verbose:
-                        print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ... SKIPPED (checkpoint)", flush=True)
+                    print(f"[Skip] Arm {arm} | Task: {task.task_id} ({condition}) ... ALREADY COMPLETED", flush=True)
                     continue
 
                 if not is_verbose:
@@ -394,7 +448,8 @@ class MultiArmCampaign:
                 )
                 elapsed_s = time.perf_counter() - t_start
                 executed_count += 1
-                completed_keys.add(run_key)
+                completed_keys.add((arm, task.task_id, condition))
+                completed_task_ids.add((arm, task.task_id))
 
                 # Determine outcome label
                 outcome_label = getattr(task_state, "outcome_label", None)
@@ -425,15 +480,37 @@ class MultiArmCampaign:
                 else:
                     print(f"[{run_num}/{total_runs}] Arm {arm} | Task: {task.task_id} ({condition}) ... DONE ({elapsed_s:.1f}s | {turns_label} | Cost: ${cost_usd:.4f} | {outcome_str})", flush=True)
 
-        # Build / sync combined trace file from all arm traces
+        # Build / sync combined trace file from all arm traces and real-time records
+        all_records_by_key = {}
+        if combined_trace_path.exists():
+            with open(combined_trace_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if not s:
+                        continue
+                    try:
+                        d = json.loads(s)
+                        k = (d.get("arm"), d.get("task_id"), d.get("step"), d.get("module"))
+                        all_records_by_key[k] = s
+                    except Exception:
+                        pass
+        for arm in self.arms:
+            a_path = arm_trace_paths[arm]
+            if a_path.exists():
+                with open(a_path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        s = line.strip()
+                        if not s:
+                            continue
+                        try:
+                            d = json.loads(s)
+                            k = (d.get("arm"), d.get("task_id"), d.get("step"), d.get("module"))
+                            all_records_by_key[k] = s
+                        except Exception:
+                            pass
         with open(combined_trace_path, "w", encoding="utf-8") as out_f:
-            for arm in self.arms:
-                a_path = arm_trace_paths[arm]
-                if a_path.exists():
-                    with open(a_path, "r", encoding="utf-8") as in_f:
-                        for line in in_f:
-                            if line.strip():
-                                out_f.write(line.strip() + "\n")
+            for s in all_records_by_key.values():
+                out_f.write(s + "\n")
 
         # Post-run statistical analysis & table generation
         metrics_engine = MetricsEngine(pricing=self.pricing)
@@ -464,7 +541,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed for task partitioning and bootstrap")
     parser.add_argument("--n-boot", type=int, default=2000, help="Number of bootstrap resamples")
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum steps per task")
-    parser.add_argument("--force-rerun", action="store_true", help="Ignore existing checkpoints and rerun all tasks")
+    parser.add_argument("--resume", action="store_true", default=True, help="Resume execution from existing checkpoints (default: True)")
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help="Do not resume; rerun without loading existing traces")
+    parser.add_argument("--force-rerun", action="store_true", help="Ignore existing checkpoints, delete old traces, and rerun all tasks")
     parser.add_argument("--allow-mock-llm", action="store_true", help="Allow fallback to simulated mock LLM for offline testing")
     parser.add_argument("--verbose", action="store_true", default=True, help="Enable live real-time step telemetry stream")
     parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable live real-time step telemetry stream")
@@ -482,8 +561,14 @@ def main() -> None:
         n_boot=args.n_boot,
         allow_mock_llm=args.allow_mock_llm,
         verbose=args.verbose,
+        resume=args.resume,
     )
-    result = campaign.run(force_rerun=args.force_rerun, max_tasks=args.max_tasks, verbose=args.verbose)
+    result = campaign.run(
+        force_rerun=args.force_rerun,
+        resume=args.resume,
+        max_tasks=args.max_tasks,
+        verbose=args.verbose,
+    )
     print(f"Campaign completed. Executed: {result['executed']}, Skipped: {result['skipped']}", flush=True)
     print(f"Traces written to: {result['trace_path']}", flush=True)
     for name, path in result["files"].items():
