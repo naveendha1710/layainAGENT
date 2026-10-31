@@ -33,14 +33,28 @@ class DefaultMockLLM:
     def __init__(self) -> None:
         self.calls = 0
 
+    def get_model_for_tier(self, tier: str) -> str:
+        if tier and tier.lower() == "small":
+            return os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+        return os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+
     def chat_complete(
         self,
         messages: List[Dict[str, str]],
         model: Optional[str] = None,
+        tier: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
         self.calls += 1
         prompt = messages[-1].get("content", "")
+
+        effective_tier = tier or (model if model in ("big", "small") else None)
+        if effective_tier:
+            target_model = self.get_model_for_tier(effective_tier)
+        elif model and model not in ("big", "small", "mock-default-model"):
+            target_model = model
+        else:
+            target_model = self.get_model_for_tier("big")
 
         # Check if observation requires routine confirmation
         has_assistant = any(m.get("role") == "assistant" for m in messages)
@@ -64,7 +78,7 @@ class DefaultMockLLM:
 
         return LLMResponse(
             content=content,
-            model=model or "mock-default-model",
+            model=target_model,
             input_tokens=len(prompt.split()) + 20,
             output_tokens=15,
             latency_ms=12.0,

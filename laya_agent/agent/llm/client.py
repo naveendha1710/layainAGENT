@@ -118,8 +118,19 @@ class NVIDIABuildClient:
         if not raw_base_url.endswith("/v1"):
             raw_base_url += "/v1"
         self.base_url = raw_base_url
-        self.model = model
-        self.small_model = small_model or os.environ.get("SMALL_TIER_MODEL")
+        if model in ("big", "default", "", None):
+            self.model = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+        elif model == "small":
+            self.model = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+        else:
+            self.model = model
+
+        if small_model in ("small", "default", "", None):
+            self.small_model = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+        elif small_model == "big":
+            self.small_model = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+        else:
+            self.small_model = small_model
         self.temperature = temperature
         self.max_retries = max_retries
         self.initial_backoff_ms = initial_backoff_ms
@@ -157,14 +168,14 @@ class NVIDIABuildClient:
 
         if effective_tier:
             target_model = self.get_model_for_tier(effective_tier)
-        elif model and model not in ("big", "small"):
+        elif model and model not in ("big", "small", "default"):
             target_model = model
         else:
             target_model = self.get_model_for_tier("big")
 
         # Safety guard: ensure the string sent over HTTP is never literally 'big' or 'small'
-        if target_model in ("big", "small"):
-            target_model = self.get_model_for_tier(target_model)
+        if target_model in ("big", "small", "default", ""):
+            target_model = self.get_model_for_tier(target_model if target_model in ("big", "small") else "big")
 
         temperature = self.temperature if temperature is None else temperature
         timeout = timeout if timeout is not None else kwargs.get("timeout")
@@ -187,9 +198,16 @@ class NVIDIABuildClient:
                     content = response.choices[0].message.content or ""
                 except (AttributeError, IndexError):
                     content = ""
+
+                resp_model = getattr(response, "model", None)
+                if not resp_model or resp_model in ("default", "big", "small", "mock-default-model"):
+                    resolved_model = target_model
+                else:
+                    resolved_model = resp_model
+
                 return LLMResponse(
                     content=content,
-                    model=getattr(response, "model", target_model),
+                    model=resolved_model,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     latency_ms=latency_ms,

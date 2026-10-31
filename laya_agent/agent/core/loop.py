@@ -215,6 +215,20 @@ class ReActLoop:
             tool_name: Optional[str] = None
             tool_args: Dict[str, Any] = {}
 
+            # If router predicted bypass, check if a concrete actionable step exists
+            if not call_llm:
+                deterministic_action = self._resolve_deterministic_action(router_result)
+                if deterministic_action is not None:
+                    tool_name, tool_args = deterministic_action
+                elif self._is_trivial_greeting_or_close(self.state.get_user_prompt()):
+                    self.state.finished = True
+                    self.state.final_answer = "Hello! Task completed. [TASK_COMPLETE]"
+                    self.state.stop_reason = "final_answer"
+                    break
+                else:
+                    # No pending action or confirmation -> do NOT execute noop. Fall back to LLM.
+                    call_llm = True
+
             if call_llm:
                 model_kwarg = {"tier": self.state.model_tier} if self.state.model_tier else {}
                 try:
@@ -228,10 +242,21 @@ class ReActLoop:
                 t0 = time.perf_counter()
                 response = self.llm_client.chat_complete(self.state.messages, **model_kwarg)
                 llm_latency_ms = (time.perf_counter() - t0) * 1000.0
+
+                # Resolve exact model name for telemetry logging
+                model_decision = getattr(response, "model", None) or ""
+                if model_decision in ("big", "small", "mock-default-model", "default", "", None):
+                    if hasattr(self.llm_client, "get_model_for_tier"):
+                        model_decision = self.llm_client.get_model_for_tier(self.state.model_tier or "big")
+                    elif self.state.model_tier == "small":
+                        model_decision = os.environ.get("SMALL_TIER_MODEL", "meta/llama-3.1-8b-instruct")
+                    else:
+                        model_decision = os.environ.get("BIG_TIER_MODEL", "meta/llama-3.1-70b-instruct")
+
                 self.state.record_step(StepRecord(
                     step=self.state.step,
                     module="llm",
-                    decision=response.model,
+                    decision=model_decision,
                     confidence=1.0,
                     fallback_used=False,
                     latency_ms=llm_latency_ms,
@@ -251,20 +276,6 @@ class ReActLoop:
                     self.state.stop_reason = "final_answer"
                     break
                 tool_name, tool_args = parsed
-            else:
-                # [D] Router bypass: deterministic follow-up, no LLM call.
-                tool_name = (
-                    router_result.raw_output.get("tool_name")
-                    if router_result and router_result.raw_output
-                    else None
-                )
-                tool_args = (
-                    router_result.raw_output.get("tool_args", {})
-                    if router_result and router_result.raw_output
-                    else {}
-                )
-                if not tool_name:
-                    tool_name, tool_args = self._deterministic_follow_up()
 
             # --- ACT / execute tool ---
             tool_result = self._execute_tool(tool_name, tool_args)
@@ -335,6 +346,10 @@ class ReActLoop:
                             "and continue toward the goal.]"
                         ),
                     })
+
+            # Increment turn budget ONLY at the end of a complete ReAct cycle
+            self.state.turn += 1
+            self.state.loop_step = self.state.turn
 
         if not self.state.finished:
             self.state.finished = True
@@ -495,9 +510,52 @@ class ReActLoop:
                     break
         return normalized
 
-    def _deterministic_follow_up(self) -> Tuple[str, Dict[str, Any]]:
-        """Router bypass: deterministic no-op follow-up requiring no LLM."""
-        return "noop", {}
+    def _is_trivial_greeting_or_close(self, text: str) -> bool:
+        """Check if user prompt is a simple greeting or closing."""
+        clean = text.strip().lower()
+        return bool(re.match(r"^(hi|hello|hey|greetings|bye|goodbye|thanks|thank you)[.!]?$", clean))
+
+    def _resolve_deterministic_action(
+        self, router_result: Optional[GateResult]
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Check if there is a concrete, actionable next step for router bypass.
+
+        Returns (tool_name, tool_args) if actionable, else None (triggers LLM fallback).
+        """
+        raw = router_result.raw_output if router_result and router_result.raw_output else {}
+        cand_tool = raw.get("tool_name")
+        cand_args = raw.get("tool_args", {})
+        known_tools = set(self.tool_registry.specs().keys()) if hasattr(self.tool_registry, "specs") else set()
+
+        # 1. If router specified a concrete, non-noop tool that exists in the registry
+        if cand_tool and str(cand_tool).lower() != "noop":
+            if not known_tools or cand_tool in known_tools:
+                return str(cand_tool), cand_args if isinstance(cand_args, dict) else {}
+
+        # 2. Check if previous tool observation required confirmation
+        last_observation = ""
+        for m in reversed(self.state.messages):
+            if m.get("role") == "user":
+                last_observation = m.get("content", "")
+                break
+
+        if "[CONFIRMATION_REQUIRED]" in last_observation or "confirmation_required" in last_observation.lower():
+            # Check if observation specifies a tool: e.g. "tool: confirm_sync"
+            tool_match = re.search(r"tool:\s*([a-zA-Z0-9_]+)", last_observation, re.IGNORECASE)
+            if tool_match:
+                spec_tool = tool_match.group(1)
+                if not known_tools or spec_tool in known_tools:
+                    return spec_tool, {}
+            if "confirm_action" in known_tools or not known_tools:
+                return "confirm_action", {}
+            # Or any tool matching confirm
+            confirm_tools = [t for t in known_tools if "confirm" in t.lower()]
+            if confirm_tools:
+                return confirm_tools[0], {}
+
+        # 3. If there is NO pending action or confirmation required (e.g. Turn 0 before any tool ran),
+        # return None to trigger immediate fallback to LLM.
+        return None
 
     def _execute_tool(self, name: str, args: Dict[str, Any]) -> ToolResult:
         t0 = time.perf_counter()

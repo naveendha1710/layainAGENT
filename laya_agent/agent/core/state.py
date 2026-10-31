@@ -43,6 +43,7 @@ class AgentState:
     model_tier: str = "big"
 
     step: int = 0
+    turn: int = 0
     loop_step: int = 0
     finished: bool = False
     final_answer: Optional[str] = None
@@ -66,8 +67,6 @@ class AgentState:
     def record_step(self, record: StepRecord) -> None:
         self.trajectory.append(record)
         self.step += 1
-        if record.module not in {"scorer", "filter"}:
-            self.loop_step += 1
         self.total_input_tokens += record.input_tokens
         self.total_output_tokens += record.output_tokens
         if record.module == "llm":
@@ -75,7 +74,7 @@ class AgentState:
         self.total_gate_latency_ms += record.latency_ms
 
     def can_continue(self) -> bool:
-        return (not self.finished) and self.loop_step < self.max_steps
+        return (not self.finished) and self.turn < self.max_steps
 
     def to_trace_ctx(self) -> Dict[str, Any]:
         return {

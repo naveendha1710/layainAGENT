@@ -104,7 +104,7 @@ def test_max_step_termination() -> None:
 
     assert result.stop_reason == "max_steps"
     assert result.finished
-    assert result.step == 2  # hit the step budget
+    assert result.turn == 2  # hit the ReAct turn budget
 
 
 def test_unknown_tool_is_captured_as_observation() -> None:
