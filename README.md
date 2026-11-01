@@ -209,19 +209,17 @@ For the full methodology, result definitions, confidence intervals, discussion, 
 
 **LAYA: Micro-Gated Multi-Arm Orchestration for Dual-Tier LLM Agent Security and Computational Efficiency**  
 *Author:* Naveen Kumar (Rathinam Global Deemed to Be University, Coimbatore, India)  
-*Preprint:* [Zenodo DOI placeholder](https://doi.org/10.5281/zenodo.xxxxxxx)
-
-Replace the placeholder above with the final DOI after the Zenodo record is published and the DOI is confirmed to resolve.
+*Preprint:* [Zenodo DOI](https://zenodo.org/records/23857217)
 
 BibTeX entry (update the DOI field after publication):
 
 ```bibtex
 @article{kumar2026laya,
   title  = {LAYA: Micro-Gated Multi-Arm Orchestration for Dual-Tier LLM Agent Security and Computational Efficiency},
-  author = {Kumar, Naveen},
+  author = {Naveen,Kumar},
   year   = {2026},
   note   = {Preprint on Zenodo},
-  doi    = {10.5281/zenodo.xxxxxxx}
+  doi    = {10.5281/zenodo.23857217}
 }
 ```
 
